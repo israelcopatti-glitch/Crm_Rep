@@ -1,122 +1,163 @@
 import streamlit as st
 import pandas as pd
+import sqlite3
 import pdfplumber
-import re
+from fpdf import FPDF
 import urllib.parse
-import os
+import matplotlib.pyplot as plt
+from io import BytesIO
+from datetime import datetime, timedelta
 
-st.set_page_config(page_title="AM CRM", layout="wide")
-st.title("🚀 AM Representações - CRM")
+# ---------------------------
+# BANCO DE DADOS (SQLite) - Persistência Total
+# ---------------------------
+conn = sqlite3.connect("crm.db", check_same_thread=False)
+cursor = conn.cursor()
 
-HISTORICO_PATH = "historico_vendas.csv"
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS clientes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    nome TEXT,
+    cnpj TEXT UNIQUE,
+    telefone TEXT
+);
+""")
 
-def extrair_dados_pedido(pdf_file):
-    texto_puro = ""
-    with pdfplumber.open(pdf_file) as pdf:
-        for page in pdf.pages:
-            texto_puro += page.extract_text() + "\n"
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS pedidos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cliente_id INTEGER,
+    produto TEXT,
+    sku TEXT,
+    quantidade REAL,
+    preco_unit REAL,
+    preco_total REAL,
+    data TEXT,
+    FOREIGN KEY(cliente_id) REFERENCES clientes(id)
+);
+""")
+conn.commit()
 
-    # 1. Nome do Cliente
-    cliente = "Cliente"
-    if "Nome Fantasia:" in texto_puro:
-        cliente = texto_puro.split("Nome Fantasia:")[1].split("\n")[0].strip()
+# ---------------------------
+# FUNÇÕES DE APOIO
+# ---------------------------
+def extrair_dados_pdf_depecil(arquivo):
+    dados = []
+    with pdfplumber.open(arquivo) as pdf:
+        texto_completo = ""
+        for pagina in pdf.pages:
+            texto_completo += pagina.extract_text() + "\n"
+        
+        # Pega Nome e Fone do cabeçalho
+        nome_fantasia = "Cliente"
+        match_nome = re.search(r"Nome Fantasia:\s*(.*)", texto_completo)
+        if match_nome: nome_fantasia = match_nome.group(1).split('\n')[0].strip()
+        
+        match_fone = re.search(r"Fone:\s*([\d\s\-]+)", texto_completo)
+        fone = "".join(re.findall(r'\d+', match_fone.group(1))) if match_fone else ""
+
+        linhas = texto_completo.split("\n")
+        for linha in linhas:
+            partes = linha.split()
+            if len(partes) >= 5 and partes[0].isdigit():
+                sku = partes[0]
+                # Pega o penúltimo valor (preço unitário no padrão Depecil)
+                try:
+                    p_unit = float(partes[-2].replace(".", "").replace(",", "."))
+                    p_total = float(partes[-1].replace(".", "").replace(",", "."))
+                    nome_prod = " ".join(partes[1:-5])
+                    dados.append({
+                        "produto": nome_prod, "sku": sku,
+                        "preco_unit": p_unit, "preco_total": p_total
+                    })
+                except: continue
+    return pd.DataFrame(dados), nome_fantasia, fone
+
+# ---------------------------
+# INTERFACE STREAMLIT
+# ---------------------------
+st.set_page_config(page_title="AM CRM Profissional", layout="wide")
+st.title("📦 CRM AM Representações - Versão Full")
+
+menu = st.sidebar.selectbox("Navegação", [
+    "📥 Importar Pedido",
+    "🔥 Comparar Ofertas",
+    "📊 Relatórios & Vendas",
+    "👥 Meus Clientes",
+    "⚠️ Alertas (Inativos)"
+])
+
+# ---------------------------
+# 1) IMPORTAR PEDIDO
+# ---------------------------
+if menu == "Importar Pedido":
+    st.header("📄 Importar Pedido PDF")
+    arquivo_pdf = st.file_uploader("Carregar PDF do pedido (Depecil/Toderke)", type=["pdf"])
+
+    if arquivo_pdf:
+        df, nome_cliente, fone = extrair_dados_pdf_depecil(arquivo_pdf)
+        st.write(f"**Cliente Identificado:** {nome_cliente}")
+        st.dataframe(df)
+
+        if st.button("Confirmar e Salvar no Banco"):
+            # Cria ou busca cliente
+            cursor.execute("INSERT OR IGNORE INTO clientes (nome, cnpj, telefone) VALUES (?, ?, ?)", 
+                           (nome_cliente, "000", fone))
+            cursor.execute("SELECT id FROM clientes WHERE nome = ?", (nome_cliente,))
+            cliente_id = cursor.fetchone()[0]
+
+            for _, row in df.iterrows():
+                cursor.execute("""
+                INSERT INTO pedidos (cliente_id, produto, sku, quantidade, preco_unit, preco_total, data)
+                VALUES (?, ?, ?, ?, ?, ?, DATE('now'))
+                """, (cliente_id, row["produto"], row["sku"], 1, row["preco_unit"], row["preco_total"]))
+            conn.commit()
+            st.success("✅ Histórico atualizado com sucesso!")
+            st.balloons()
+
+# ---------------------------
+# 3) RELATÓRIOS AVANÇADOS
+# ---------------------------
+elif menu == "Relatórios & Vendas":
+    st.header("📈 Relatórios de Desempenho")
+    df_pedidos = pd.read_sql_query("""
+        SELECT p.*, c.nome as cliente_nome 
+        FROM pedidos p JOIN clientes c ON p.cliente_id = c.id
+    """, conn)
+
+    if not df_pedidos.empty:
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("Top 5 Clientes")
+            vendas_cli = df_pedidos.groupby("cliente_nome")["preco_total"].sum().nlargest(5)
+            st.bar_chart(vendas_cli)
+        
+        with col2:
+            st.subheader("Produtos + Vendidos")
+            vendas_prod = df_pedidos.groupby("produto")["quantidade"].sum().nlargest(5)
+            st.bar_chart(vendas_prod)
+
+        st.subheader("Lista Geral de Pedidos")
+        st.dataframe(df_pedidos)
+
+# ---------------------------
+# 5) ALERTAS DE INATIVOS
+# ---------------------------
+elif menu == "Alertas (Inativos)":
+    st.header("⚠️ Clientes sem comprar")
+    dias = st.slider("Dias de inatividade:", 15, 90, 30)
     
-    # 2. Telefone Real (Número do Cliente)
-    telefone = ""
-    if "Fone:" in texto_puro:
-        # Extrai apenas os números do campo fone
-        fone_raw = texto_puro.split("Fone:")[1].split("\n")[0].strip()
-        telefone = "".join(re.findall(r'\d+', fone_raw))
-        if telefone and not telefone.startswith("55"):
-            telefone = "55" + telefone
-
-    # 3. LEITURA FLEXÍVEL DE PRODUTOS
-    dados_finais = []
-    linhas = texto_puro.split('\n')
+    query = f"""
+    SELECT c.nome, MAX(p.data) as ultima_compra, c.telefone
+    FROM clientes c
+    JOIN pedidos p ON c.id = p.cliente_id
+    GROUP BY c.nome
+    HAVING ultima_compra <= DATE('now', '-{dias} days')
+    """
+    inativos = pd.read_sql_query(query, conn)
     
-    for linha in linhas:
-        partes = linha.split()
-        # Se a linha começa com número (SKU) e tem pelo menos 4 partes (SKU, Nome, Un, Preço)
-        if len(partes) >= 4 and partes[0].isdigit():
-            sku = partes[0]
-            
-            # Procuramos o preço unitário (valor com vírgula, geralmente no final)
-            # Vamos varrer a linha de trás para frente para achar o valor real pago
-            preco_limpo = None
-            for p in reversed(partes):
-                if "," in p and p.replace(',', '').replace('.', '').isdigit():
-                    try:
-                        preco_limpo = float(p.replace('.', '').replace(',', '.'))
-                        break # Achou o primeiro valor com vírgula da direita para a esquerda
-                    except:
-                        continue
-            
-            if preco_limpo:
-                # O nome é o que sobra entre o SKU e os dados técnicos
-                nome = " ".join(partes[1:-4]) 
-                dados_finais.append([sku, nome, preco_limpo, cliente, telefone])
-
-    if not dados_finais:
-        return None
-    return pd.DataFrame(dados_finais, columns=['SKU', 'Produto', 'Preço_Pago', 'Nome_Cliente', 'Telefone'])
-
-# --- INTERFACE ---
-aba1, aba2 = st.tabs(["📥 Alimentar Histórico", "💰 Gerar Ofertas"])
-
-with aba1:
-    st.header("Upload do Pedido")
-    arquivo = st.file_uploader("Suba o PDF do Pedido", type="pdf")
-    if arquivo:
-        dados = extrair_dados_pedido(arquivo)
-        if dados is not None:
-            st.success(f"✅ Identificado: {dados['Nome_Cliente'].iloc[0]}")
-            st.write(f"📞 WhatsApp do Cliente: {dados['Telefone'].iloc[0]}")
-            st.table(dados[['SKU', 'Produto', 'Preço_Pago']])
-            if st.button("SALVAR NO HISTÓRICO"):
-                if os.path.exists(HISTORICO_PATH):
-                    antigo = pd.read_csv(HISTORICO_PATH, dtype={'SKU': str})
-                    novo = pd.concat([antigo, dados]).drop_duplicates(subset=['SKU', 'Preço_Pago'])
-                    novo.to_csv(HISTORICO_PATH, index=False)
-                else:
-                    dados.to_csv(HISTORICO_PATH, index=False)
-                st.balloons()
-                st.success("Histórico atualizado! Dados guardados para os próximos 6 meses.")
-        else:
-            st.error("ERRO: Não encontrei produtos. Verifique se o PDF tem texto selecionável.")
-
-with aba2:
-    st.header("Cruzamento de Ofertas")
-    jornal = st.file_uploader("Suba o Jornal (MATRIZ)", type="pdf")
-    if jornal and os.path.exists(HISTORICO_PATH):
-        with pdfplumber.open(jornal) as pdf:
-            txt_jornal = "\n".join([p.extract_text() for p in pdf.pages if p.extract_text()])
-        
-        hist = pd.read_csv(HISTORICO_PATH, dtype={'SKU': str})
-        ofertas_list = []
-        
-        for _, row in hist.iterrows():
-            sku_busca = str(row['SKU'])
-            if sku_busca in txt_jornal:
-                # Procura a linha que contém o código no jornal
-                for l_jornal in txt_jornal.split('\n'):
-                    if l_jornal.startswith(sku_busca):
-                        # Pega o último preço com vírgula da linha do jornal
-                        precos_j = re.findall(r"(\d+,\d{2,4})", l_jornal)
-                        if precos_j:
-                            valor_j = float(precos_j[-1].replace(',', '.'))
-                            if valor_j < row['Preço_Pago']:
-                                ofertas_list.append([row['SKU'], row['Produto'], row['Preço_Pago'], valor_j, row['Nome_Cliente'], row['Telefone']])
-        
-        if ofertas_list:
-            df_of = pd.DataFrame(ofertas_list, columns=['SKU', 'Produto', 'Antigo', 'Novo', 'Cliente', 'WhatsApp'])
-            st.write(f"### 🔥 Ofertas para {df_of['Cliente'].iloc[0]}")
-            st.table(df_of[['Produto', 'Antigo', 'Novo']])
-            
-            msg = f"Olá, *{df_of['Cliente'].iloc[0]}*! Itens que você compra entraram em oferta:\n\n"
-            for _, r in df_of.iterrows():
-                msg += f"✅ *{r['Produto']}*\nDe: R${r['Antigo']:.2f} por *R${r['Novo']:.2f}*\n\n"
-            
-            link = f"https://api.whatsapp.com/send?phone={df_of['WhatsApp'].iloc[0]}&text={urllib.parse.quote(msg)}"
-            st.markdown(f"## [👉 ENVIAR PARA WHATSAPP REAL]({link})")
-        else:
-            st.info("Nenhuma oferta menor que o histórico foi encontrada.")
+    if not inativos.empty:
+        st.warning(f"Encontramos {len(inativos)} clientes sumidos há mais de {dias} dias!")
+        st.dataframe(inativos)
+    else:
+        st.success("Todos os clientes estão ativos!")
