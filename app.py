@@ -1,124 +1,96 @@
 import streamlit as st
 import pandas as pd
-import sqlite3
-import pdfplumber
-import re
-from datetime import datetime, timedelta
+from datetime import date
+from extratores import extrair_pedido_pdf, extrair_jornal_pdf, extrair_jornal_excel
+from db import get_connection, init_db
 
-# --- 1. CONFIGURAÇÃO ---
-st.set_page_config(page_title="AM CRM", layout="wide")
-st.markdown("<style>header, footer, #MainMenu {visibility: hidden !important;}</style>", unsafe_allow_html=True)
+st.set_page_config(page_title="Pedidos & Ofertas", layout="wide")
 
-DB_NAME = "am_crm_v2026_final.db"
+init_db()
 
-# --- 2. BANCO DE DADOS (RÁPIDO) ---
-def run_db(query, params=()):
-    with sqlite3.connect(DB_NAME, timeout=30) as conn:
-        conn.execute("PRAGMA journal_mode=WAL")
-        cursor = conn.cursor()
-        cursor.execute(query, params)
-        conn.commit()
+tabs = st.tabs(["Registrar Pedido", "Jornal de Ofertas", "Cruzamento"])
 
-def query_db(query, params=()):
-    with sqlite3.connect(DB_NAME, timeout=30) as conn:
-        return pd.read_sql(query, conn, params=params)
+# ============================================================
+# TAB 1 - REGISTRAR PEDIDO
+# ============================================================
+with tabs[0]:
+    st.header("Registrar Pedido")
+    f = st.file_uploader("Enviar Pedido (PDF)", type=["pdf"])
 
-# Inicialização
-run_db("CREATE TABLE IF NOT EXISTS historico (id INTEGER PRIMARY KEY AUTOINCREMENT, cliente TEXT, fone TEXT, sku TEXT, produto TEXT, preco REAL, data TEXT, lote TEXT)")
-run_db("CREATE TABLE IF NOT EXISTS jornal (id INTEGER PRIMARY KEY AUTOINCREMENT, sku TEXT, produto TEXT, preco_oferta REAL, validade TEXT, lote TEXT)")
+    if f:
+        dados = extrair_pedido_pdf(f)
+        df = pd.DataFrame(dados, columns=["cliente", "telefone", "sku", "produto", "valor"])
+        st.dataframe(df)
 
-# --- 3. MOTOR DE EXTRAÇÃO (OTIMIZADO) ---
-def extrair_pdf(file):
-    lista = []
-    cli, fon = "Cliente", ""
-    with pdfplumber.open(file) as pdf:
-        for page in pdf.pages:
-            txt = page.extract_text()
-            if not txt: continue
-            if cli == "Cliente":
-                m_c = re.search(r"Nome Fantasia:\s*(.*)", txt)
-                if m_c: cli = m_c.group(1).split('\n')[0].strip()
-                m_f = re.search(r"Fone:\s*(\d+)", txt)
-                if m_f: fon = m_f.group(1).strip()
-            for linha in txt.split('\n'):
-                sku_m = re.search(r"\b(\d{4,7})\b", linha)
-                if sku_m:
-                    sku = sku_m.group(1)
-                    precos = re.findall(r"(\d{1,3}(?:\.\d{3})*,\d{2})", linha)
-                    if precos:
-                        valor = float(precos[-1].replace('.', '').replace(',', '.'))
-                        lista.append((cli, fon, sku, linha[:40].strip(), valor))
-    return lista
+        if st.button("Salvar Pedido"):
+            conn = get_connection()
+            for c, t, s, p, v in dados:
+                conn.execute("INSERT INTO pedidos (cliente, telefone, sku, produto, valor, lote) VALUES (?,?,?,?,?,?)",
+                             (c, t, s, p, v, f.name))
+            conn.commit()
+            conn.close()
+            st.success("Pedido registrado!")
+            st.experimental_rerun()
 
-# --- 4. INTERFACE ---
-st.title("AM Representações")
-t1, t2, t3, t4, t5 = st.tabs(["📥 Pedido", "📰 Jornal", "🔥 Cruzar", "📊 Histórico", "📋 Ofertas"])
 
-with t1:
-    f_p = st.file_uploader("Subir Pedido", type="pdf", key="p")
-    if f_p:
-        # Verifica se já existe esse lote no histórico
-        existe = query_db("SELECT COUNT(*) as total FROM historico WHERE lote = ?", (f_p.name,))['total'][0]
-        if existe > 0:
-            st.warning(f"⚠️ Atenção: O arquivo '{f_p.name}' já foi importado anteriormente.")
-        
-        dados = extrair_pdf(f_p)
-        if dados:
-            st.info(f"Cliente: {dados[0][0]}")
-            if st.button("💾 SALVAR PEDIDO (MESMO SE DUPLICADO)"):
-                hoje = datetime.now().strftime("%Y-%m-%d")
-                with sqlite3.connect(DB_NAME) as conn:
-                    for d in dados:
-                        conn.execute("INSERT INTO historico (cliente, fone, sku, produto, preco, data, lote) VALUES (?,?,?,?,?,?,?)",
-                                   (d[0], d[1], d[2], d[3], d[4], hoje, f_p.name))
-                st.success("Pedido registrado!")
-                st.rerun()
+# ============================================================
+# TAB 2 - JORNAL
+# ============================================================
+with tabs[1]:
+    st.header("Jornal de Ofertas")
+    f = st.file_uploader("Enviar Jornal", type=["pdf", "xlsx", "csv"])
+    validade = st.date_input("Validade", date.today(), format="DD/MM/YYYY")
 
-with t2:
-    # Seletor - Dias +
-    if "d" not in st.session_state: st.session_state.d = 7
-    c1, c2, c3 = st.columns([1, 1, 1])
-    with c1:
-        if st.button("➖ 1 Dia"): st.session_state.d = max(1, st.session_state.d - 1)
-    with c2:
-        st.markdown(f"<h2 style='text-align: center;'>{st.session_state.d} Dias</h2>", unsafe_allow_html=True)
-    with c3:
-        if st.button("➕ 1 Dia"): st.session_state.d += 1
-    
-    dt_v = (datetime.now() + timedelta(days=st.session_state.d)).strftime("%Y-%m-%d")
-    f_j = st.file_uploader("Subir Jornal", type="pdf", key="j")
-    
-    if f_j:
-        existe_j = query_db("SELECT COUNT(*) as total FROM jornal WHERE lote = ?", (f_j.name,))['total'][0]
-        if existe_j > 0:
-            st.warning(f"⚠️ Este Jornal ({f_j.name}) já está ativo.")
-            
-        if st.button("🚀 ATIVAR JORNAL"):
-            dados_j = extrair_pdf(f_j)
-            if dados_j:
-                with sqlite3.connect(DB_NAME) as conn:
-                    for d in dados_j:
-                        conn.execute("INSERT INTO jornal (sku, produto, preco_oferta, validade, lote) VALUES (?,?,?,?,?)",
-                                   (d[2], d[3], d[4], dt_v, f_j.name))
-                st.success("Jornal ativado!")
-                st.rerun()
+    if f:
+        # Detecta tipo
+        if f.name.endswith(".pdf"):
+            dados_j = extrair_jornal_pdf(f)
+        elif f.name.endswith(".xlsx"):
+            df = pd.read_excel(f)
+            dados_j = extrair_jornal_excel(df)
+        elif f.name.endswith(".csv"):
+            df = pd.read_csv(f)
+            dados_j = extrair_jornal_excel(df)
 
-with t3:
-    # Cruzamento de dados com número real do cliente
-    df_c = query_db("""SELECT h.cliente, h.fone, j.produto, h.preco as antigo, j.preco_oferta as novo, j.validade, j.lote
-                       FROM jornal j INNER JOIN historico h ON j.sku = h.sku 
-                       WHERE j.preco_oferta < h.preco GROUP BY h.cliente, j.sku""")
-    if not df_c.empty:
-        st.dataframe(df_c, use_container_width=True)
+        dfj = pd.DataFrame(dados_j, columns=["sku", "produto", "preco_oferta"])
+        st.dataframe(dfj)
+
+        if st.button("Ativar Jornal"):
+            conn = get_connection()
+            for s, p, po in dados_j:
+                conn.execute("INSERT INTO jornal (sku, produto, preco_oferta, validade, lote) VALUES (?,?,?,?,?)",
+                             (s, p, po, validade, f.name))
+            conn.commit()
+            conn.close()
+            st.success("Jornal ativado!")
+            st.experimental_rerun()
+
+
+# ============================================================
+# TAB 3 - CRUZAMENTO
+# ============================================================
+with tabs[2]:
+    st.header("Cruzamento de Pedidos x Ofertas")
+
+    conn = get_connection()
+
+    dfp = pd.read_sql_query("SELECT * FROM pedidos", conn)
+    dfj = pd.read_sql_query("SELECT * FROM jornal", conn)
+
+    if dfp.empty or dfj.empty:
+        st.warning("Cadastre pedidos e jornal para cruzar")
     else:
-        st.info("Sem ofertas vantajosas no momento.")
+        cruz = dfp.merge(dfj, on="sku", how="left")
+        cruz["diferenca"] = cruz["valor"] - cruz["preco_oferta"]
+        cruz["melhor_oferta"] = cruz["diferenca"] > 0
 
-with t5:
-    st.subheader("Gerenciar Jornais")
-    lotes = query_db("SELECT lote, validade, COUNT(*) as itens FROM jornal GROUP BY lote")
-    if not lotes.empty:
-        st.table(lotes)
-        l_del = st.selectbox("Remover Arquivo:", lotes['lote'].tolist())
-        if st.button("🗑️ EXCLUIR"):
-            run_db("DELETE FROM jornal WHERE lote=?", (l_del,))
-            st.rerun()
+        st.dataframe(cruz)
+
+        ofertas = cruz[cruz["melhor_oferta"] == True]
+        if not ofertas.empty:
+            st.success("Clientes com ofertas melhores disponíveis:")
+            st.dataframe(ofertas)
+        else:
+            st.info("Nenhuma oferta melhor encontrada.")
+
+    conn.close()
