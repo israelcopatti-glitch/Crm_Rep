@@ -9,9 +9,9 @@ from datetime import datetime, timedelta
 st.set_page_config(page_title="AM CRM", layout="wide")
 st.markdown("<style>header, footer, #MainMenu {visibility: hidden !important;}</style>", unsafe_allow_html=True)
 
-# --- 2. BANCO DE DADOS ---
+# --- 2. BANCO DE DADOS (CONEXÃO RÁPIDA) ---
 def init_db():
-    conn = sqlite3.connect("am_vfinal_2026.db", check_same_thread=False)
+    conn = sqlite3.connect("am_v2026_fast.db", check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("""CREATE TABLE IF NOT EXISTS historico (
         id INTEGER PRIMARY KEY AUTOINCREMENT, cliente TEXT, fone TEXT, sku TEXT, 
@@ -24,7 +24,7 @@ def init_db():
 
 db = init_db()
 
-# --- 3. MOTOR DE EXTRAÇÃO ---
+# --- 3. MOTOR DE EXTRAÇÃO (ANÁLISE DE DADOS REAIS) ---
 def extrair_pdf(file):
     lista = []
     cli, fon = "Cliente", ""
@@ -64,7 +64,7 @@ with t1:
         df = extrair_pdf(f)
         if not df.empty:
             st.info(f"Cliente: {df['cliente'].iloc[0]}")
-            if st.button("💾 SALVAR"):
+            if st.button("💾 SALVAR PEDIDO"):
                 hoje = datetime.now().strftime("%Y-%m-%d")
                 for _, r in df.iterrows():
                     db.execute("INSERT OR IGNORE INTO historico (cliente, fone, sku, produto, qtde, preco, data) VALUES (?,?,?,?,?,?,?)", 
@@ -74,26 +74,37 @@ with t1:
                 st.rerun()
 
 with t2:
-    if "jk" not in st.session_state: st.session_state.jk = 0
-    # Validade simplificada (conforme pedido)
-    dias = st.select_slider("Dias de Validade:", options=[3, 7, 15, 30, 60], value=15)
-    data_expira = (datetime.now() + timedelta(days=dias)).strftime("%Y-%m-%d")
-    st.write(f"Vence em: {dias} dias ({data_expira})")
+    st.subheader("Prazo do Jornal")
+    # INTERFACE SIMPLIFICADA: - X DIAS +
+    if "dias" not in st.session_state: st.session_state.dias = 7
     
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col1:
+        if st.button("➖ 1 Dia"): st.session_state.dias = max(1, st.session_state.dias - 1)
+    with col2:
+        st.markdown(f"<h3 style='text-align: center;'>{st.session_state.dias} Dias</h3>", unsafe_allow_html=True)
+    with col3:
+        if st.button("➕ 1 Dia"): st.session_state.dias += 1
+
+    data_vencimento = (datetime.now() + timedelta(days=st.session_state.dias)).strftime("%Y-%m-%d")
+    st.caption(f"Vencimento calculado: {datetime.strptime(data_vencimento, '%Y-%m-%d').strftime('%d/%m/%Y')}")
+
+    if "jk" not in st.session_state: st.session_state.jk = 0
     fj = st.file_uploader("Subir Jornal", type="pdf", key=f"j_{st.session_state.jk}")
-    if fj and st.button("🚀 ATIVAR OFERTAS"):
+    
+    if fj and st.button("🚀 ATIVAR OFERTAS AGORA"):
         dfj = extrair_pdf(fj)
         if not dfj.empty:
             for _, r in dfj.iterrows():
                 db.execute("INSERT OR IGNORE INTO jornal (sku, produto, preco_oferta, validade) VALUES (?,?,?,?)", 
-                          (r['sku'], r['produto'], r['preco'], data_expira))
+                          (r['sku'], r['produto'], r['preco'], data_vencimento))
             db.commit()
-            st.success(f"Ativado: {len(dfj)} produtos!")
+            st.success(f"Ativado! {len(dfj)} itens valendo por {st.session_state.dias} dias.")
             st.session_state.jk += 1
             st.rerun()
 
 with t3:
-    # Cruzamento de dados
+    # CRUZAMENTO DE DADOS (O VÍDEO DA LÓGICA)
     db.execute("DELETE FROM jornal WHERE validade < DATE('now')")
     db.commit()
     q = """SELECT h.cliente, h.fone, j.produto, h.preco as antigo, j.preco_oferta as novo, j.validade 
@@ -112,7 +123,7 @@ with t4:
         query = f"SELECT * FROM historico" + (f" WHERE cliente='{sel}'" if sel != "Todos" else "") + " ORDER BY id DESC"
         st.dataframe(pd.read_sql(query, db), use_container_width=True)
         idx = st.number_input("ID p/ apagar:", min_value=0, step=1)
-        if st.button("Apagar"):
+        if st.button("Apagar Registro"):
             db.execute(f"DELETE FROM historico WHERE id={idx}")
             db.commit()
             st.rerun()
@@ -120,7 +131,7 @@ with t4:
 with t5:
     st.dataframe(pd.read_sql("SELECT * FROM jornal ORDER BY validade ASC", db), use_container_width=True)
     idxj = st.number_input("ID oferta p/ apagar:", min_value=0, step=1, key="del_j")
-    if st.button("Remover"):
+    if st.button("Remover Oferta"):
         db.execute(f"DELETE FROM jornal WHERE id={idxj}")
         db.commit()
         st.rerun()
