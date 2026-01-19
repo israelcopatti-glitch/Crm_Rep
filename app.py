@@ -1,96 +1,236 @@
 import streamlit as st
 import pandas as pd
-from datetime import date
-from extratores import extrair_pedido_pdf, extrair_jornal_pdf, extrair_jornal_excel
-from db import get_connection, init_db
+import sqlite3
+import pdfplumber
+from datetime import datetime
 
-st.set_page_config(page_title="Pedidos & Ofertas", layout="wide")
+# =========================================================
+# CONFIGURAÇÃO INICIAL DO STREAMLIT
+# =========================================================
+st.set_page_config(
+    page_title="CRM Comercial | MVP",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# =========================================================
+# INICIALIZAR BANCO DE DADOS SQLITE
+# =========================================================
+def init_db():
+    conn = sqlite3.connect("crm.db")
+    cursor = conn.cursor()
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS clientes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nome TEXT,
+        cnpj TEXT UNIQUE
+    )
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS pedidos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cliente_id INTEGER,
+        data DATE,
+        codigo TEXT,
+        produto TEXT,
+        qtd INTEGER,
+        preco_unit REAL,
+        preco_total REAL,
+        FOREIGN KEY(cliente_id) REFERENCES clientes(id)
+    )
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS ofertas (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        codigo TEXT,
+        produto TEXT,
+        preco_pr REAL,
+        data_inicio DATE,
+        data_fim DATE
+    )
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS alertas (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cliente_id INTEGER,
+        codigo TEXT,
+        mensagem TEXT,
+        data DATE,
+        FOREIGN KEY(cliente_id) REFERENCES clientes(id)
+    )
+    """)
+
+    conn.commit()
+    conn.close()
 
 init_db()
 
-tabs = st.tabs(["Registrar Pedido", "Jornal de Ofertas", "Cruzamento"])
+# =========================================================
+# FUNÇÕES AUXILIARES
+# =========================================================
+def adicionar_cliente(nome, cnpj):
+    conn = sqlite3.connect("crm.db")
+    cursor = conn.cursor()
+    try:
+        cursor.execute("INSERT INTO clientes (nome, cnpj) VALUES (?,?)", (nome, cnpj))
+        conn.commit()
+    except:
+        pass
+    conn.close()
 
-# ============================================================
-# TAB 1 - REGISTRAR PEDIDO
-# ============================================================
-with tabs[0]:
-    st.header("Registrar Pedido")
-    f = st.file_uploader("Enviar Pedido (PDF)", type=["pdf"])
+def buscar_cliente_por_cnpj(cnpj):
+    conn = sqlite3.connect("crm.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM clientes WHERE cnpj = ?", (cnpj,))
+    result = cursor.fetchone()
+    conn.close()
+    return result[0] if result else None
 
-    if f:
-        dados = extrair_pedido_pdf(f)
-        df = pd.DataFrame(dados, columns=["cliente", "telefone", "sku", "produto", "valor"])
+def salvar_pedido(cliente_id, codigo, produto, qtd, preco_unit, preco_total):
+    conn = sqlite3.connect("crm.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO pedidos (cliente_id, data, codigo, produto, qtd, preco_unit, preco_total)
+        VALUES (?,?,?,?,?,?,?)
+    """, (cliente_id, datetime.now().date(), codigo, produto, qtd, preco_unit, preco_total))
+    conn.commit()
+    conn.close()
+
+# =========================================================
+# EXTRAÇÃO SIMPLES DO PDF (PLACEHOLDER)
+# =========================================================
+def extrair_pedido_simples(pdf_file):
+    """
+    Essa função lê o PDF e retorna um exemplo.
+    Depois vamos substituir pela extração real OCR/Regex.
+    """
+    example = [
+        {"CNPJ": "12.345.678/0001-90", "Cliente": "Cliente Exemplo",
+         "Código": "37050", "Produto": "DOBRADICA SOBREPOR",
+         "Qtd": 60, "Unit": 31.62, "Total": 1897.42}
+    ]
+    return pd.DataFrame(example)
+
+# =========================================================
+# PÁGINA: HOME
+# =========================================================
+def pagina_home():
+    st.title("📦 CRM Comercial - MVP")
+    st.subheader("Análise de Pedidos & Ofertas - Mobile Ready")
+    st.write("""
+        Bem-vindo ao MVP!  
+        Aqui você poderá extrair pedidos de PDF, importar ofertas e gerar alertas automáticos.
+    """)
+    st.success("💡 Totalmente funcional via celular!")
+
+# =========================================================
+# PÁGINA: IMPORTAR PEDIDOS PDF
+# =========================================================
+def pagina_importar_pedidos():
+    st.title("📄 Importar Pedidos (PDF)")
+
+    pdf_file = st.file_uploader("Selecione o PDF do pedido", type=["pdf"])
+
+    if pdf_file:
+        st.info("📁 Processando PDF...")
+
+        df = extrair_pedido_simples(pdf_file)
         st.dataframe(df)
 
-        if st.button("Salvar Pedido"):
-            conn = get_connection()
-            for c, t, s, p, v in dados:
-                conn.execute("INSERT INTO pedidos (cliente, telefone, sku, produto, valor, lote) VALUES (?,?,?,?,?,?)",
-                             (c, t, s, p, v, f.name))
-            conn.commit()
-            conn.close()
-            st.success("Pedido registrado!")
-            st.experimental_rerun()
+        if st.button("Salvar Pedido no Sistema"):
+            cnpj = df.iloc[0]["CNPJ"]
+            cliente = df.iloc[0]["Cliente"]
 
+            adicionar_cliente(cliente, cnpj)
+            cliente_id = buscar_cliente_por_cnpj(cnpj)
 
-# ============================================================
-# TAB 2 - JORNAL
-# ============================================================
-with tabs[1]:
-    st.header("Jornal de Ofertas")
-    f = st.file_uploader("Enviar Jornal", type=["pdf", "xlsx", "csv"])
-    validade = st.date_input("Validade", date.today(), format="DD/MM/YYYY")
+            for _, row in df.iterrows():
+                salvar_pedido(
+                    cliente_id,
+                    row["Código"],
+                    row["Produto"],
+                    row["Qtd"],
+                    row["Unit"],
+                    row["Total"]
+                )
+            st.success("✔ Pedido salvo com sucesso!")
 
-    if f:
-        # Detecta tipo
-        if f.name.endswith(".pdf"):
-            dados_j = extrair_jornal_pdf(f)
-        elif f.name.endswith(".xlsx"):
-            df = pd.read_excel(f)
-            dados_j = extrair_jornal_excel(df)
-        elif f.name.endswith(".csv"):
-            df = pd.read_csv(f)
-            dados_j = extrair_jornal_excel(df)
+# =========================================================
+# PÁGINA: IMPORTAR OFERTAS (JORNAL)
+# =========================================================
+def pagina_ofertas():
+    st.title("📰 Importar Jornal de Ofertas")
 
-        dfj = pd.DataFrame(dados_j, columns=["sku", "produto", "preco_oferta"])
-        st.dataframe(dfj)
+    excel = st.file_uploader("Selecione arquivo XLSX/CSV", type=["xlsx", "csv"])
 
-        if st.button("Ativar Jornal"):
-            conn = get_connection()
-            for s, p, po in dados_j:
-                conn.execute("INSERT INTO jornal (sku, produto, preco_oferta, validade, lote) VALUES (?,?,?,?,?)",
-                             (s, p, po, validade, f.name))
-            conn.commit()
-            conn.close()
-            st.success("Jornal ativado!")
-            st.experimental_rerun()
-
-
-# ============================================================
-# TAB 3 - CRUZAMENTO
-# ============================================================
-with tabs[2]:
-    st.header("Cruzamento de Pedidos x Ofertas")
-
-    conn = get_connection()
-
-    dfp = pd.read_sql_query("SELECT * FROM pedidos", conn)
-    dfj = pd.read_sql_query("SELECT * FROM jornal", conn)
-
-    if dfp.empty or dfj.empty:
-        st.warning("Cadastre pedidos e jornal para cruzar")
-    else:
-        cruz = dfp.merge(dfj, on="sku", how="left")
-        cruz["diferenca"] = cruz["valor"] - cruz["preco_oferta"]
-        cruz["melhor_oferta"] = cruz["diferenca"] > 0
-
-        st.dataframe(cruz)
-
-        ofertas = cruz[cruz["melhor_oferta"] == True]
-        if not ofertas.empty:
-            st.success("Clientes com ofertas melhores disponíveis:")
-            st.dataframe(ofertas)
+    if excel:
+        if excel.name.endswith(".csv"):
+            df = pd.read_csv(excel)
         else:
-            st.info("Nenhuma oferta melhor encontrada.")
+            df = pd.read_excel(excel)
 
+        st.dataframe(df)
+
+        if st.button("Salvar Ofertas"):
+            conn = sqlite3.connect("crm.db")
+            cursor = conn.cursor()
+            for _, row in df.iterrows():
+                cursor.execute("""
+                    INSERT INTO ofertas (codigo, produto, preco_pr, data_inicio, data_fim)
+                    VALUES (?,?,?,?,?)
+                """, (row["Código"], row["Produto"], row["PR"], datetime.now().date(), None))
+            conn.commit()
+            conn.close()
+            st.success("✔ Ofertas salvas com sucesso!")
+
+# =========================================================
+# PÁGINA: RELATÓRIOS
+# =========================================================
+def pagina_relatorios():
+    st.title("📊 Relatórios e Indicadores")
+
+    conn = sqlite3.connect("crm.db")
+    df = pd.read_sql_query("""
+        SELECT c.nome, p.codigo, p.produto, SUM(p.qtd) as total_qtd, SUM(p.preco_total) as total_vendido
+        FROM pedidos p
+        JOIN clientes c ON p.cliente_id = c.id
+        GROUP BY c.nome, p.codigo, p.produto
+    """, conn)
     conn.close()
+
+    if df.empty:
+        st.warning("Sem dados ainda! Importe pedidos primeiro.")
+        return
+
+    st.subheader("🔥 Produtos mais vendidos")
+    st.dataframe(df.sort_values("total_qtd", ascending=False).head(10))
+
+    st.subheader("💰 Melhores clientes por faturamento")
+    clientes = df.groupby("nome")["total_vendido"].sum().reset_index()
+    st.dataframe(clientes.sort_values("total_vendido", ascending=False).head(10))
+
+# =========================================================
+# SISTEMA DE NAVEGAÇÃO
+# =========================================================
+menu = st.sidebar.radio("Menu", [
+    "🏠 Home",
+    "📄 Importar Pedidos",
+    "📰 Importar Ofertas",
+    "📊 Relatórios"
+])
+
+if menu == "🏠 Home":
+    pagina_home()
+
+elif menu == "📄 Importar Pedidos":
+    pagina_importar_pedidos()
+
+elif menu == "📰 Importar Ofertas":
+    pagina_ofertas()
+
+elif menu == "📊 Relatórios":
+    pagina_relatorios()
