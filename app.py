@@ -9,9 +9,9 @@ from datetime import datetime, timedelta
 st.set_page_config(page_title="AM CRM", layout="wide")
 st.markdown("<style>header, footer, #MainMenu {visibility: hidden !important;}</style>", unsafe_allow_html=True)
 
-# --- 2. BANCO DE DADOS ---
+# --- 2. BANCO DE DADOS (SIMPLIFICADO) ---
 def init_db():
-    conn = sqlite3.connect("am_v2026_fast.db", check_same_thread=False)
+    conn = sqlite3.connect("am_v2026_alerta.db", check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("""CREATE TABLE IF NOT EXISTS historico (
         id INTEGER PRIMARY KEY AUTOINCREMENT, cliente TEXT, fone TEXT, sku TEXT, 
@@ -24,14 +24,14 @@ def init_db():
 
 db = init_db()
 
-# --- 3. MOTOR DE EXTRAÇÃO (DADOS REAIS) ---
+# --- 3. MOTOR DE EXTRAÇÃO ---
 def extrair_pdf(file):
     lista = []
     cli, fon = "Cliente", ""
     with pdfplumber.open(file) as pdf:
         for page in pdf.pages:
             txt = page.extract_text()
-            if not txt: continue
+            if not txt or cli == "Cliente" and not re.search(r"Nome Fantasia:", txt): continue
             if cli == "Cliente":
                 m_c = re.search(r"Nome Fantasia:\s*(.*)", txt)
                 if m_c: cli = m_c.group(1).split('\n')[0].strip()
@@ -44,12 +44,7 @@ def extrair_pdf(file):
                     if len(v) >= 4:
                         try:
                             idx = pts.index(v[0])
-                            lista.append({
-                                "cliente": cli, "fone": fon, "sku": pts[0].strip(), 
-                                "produto": " ".join(pts[1:idx]), 
-                                "qtde": float(v[-3].replace(".", "").replace(",", ".")), 
-                                "preco": float(v[-2].replace(".", "").replace(",", "."))
-                            })
+                            lista.append({"cliente": cli, "fone": fon, "sku": pts[0].strip(), "produto": " ".join(pts[1:idx]), "qtde": float(v[-3].replace(".", "").replace(",", ".")), "preco": float(v[-2].replace(".", "").replace(",", "."))})
                         except: continue
     return pd.DataFrame(lista)
 
@@ -67,82 +62,74 @@ with t1:
             if st.button("💾 SALVAR PEDIDO"):
                 hoje = datetime.now().strftime("%Y-%m-%d")
                 for _, r in df.iterrows():
-                    db.execute("INSERT OR IGNORE INTO historico (cliente, fone, sku, produto, qtde, preco, data) VALUES (?,?,?,?,?,?,?)", 
-                              (r['cliente'], r['fone'], r['sku'], r['produto'], r['qtde'], r['preco'], hoje))
+                    db.execute("INSERT OR IGNORE INTO historico (cliente, fone, sku, produto, qtde, preco, data) VALUES (?,?,?,?,?,?,?)", (r['cliente'], r['fone'], r['sku'], r['produto'], r['qtde'], r['preco'], hoje))
                 db.commit()
                 st.session_state.pk += 1
                 st.rerun()
 
 with t2:
-    st.subheader("Prazo de Validade do Jornal")
-    
-    # --- NOVO SELETOR: - X DIAS + ---
-    if "dias_oferta" not in st.session_state: st.session_state.dias_oferta = 7
-    
-    col1, col2, col3 = st.columns([1, 1, 1])
-    with col1:
-        if st.button("➖ Reduzir Dia"): 
-            st.session_state.dias_oferta = max(1, st.session_state.dias_oferta - 1)
-    with col2:
-        st.markdown(f"<h2 style='text-align: center;'>{st.session_state.dias_oferta} Dias</h2>", unsafe_allow_html=True)
-    with col3:
-        if st.button("➕ Adicionar Dia"): 
-            st.session_state.dias_oferta += 1
+    st.subheader("Prazo do Jornal")
+    if "d" not in st.session_state: st.session_state.d = 7
+    c1, c2, c3 = st.columns([1, 1, 1])
+    with c1:
+        if st.button("➖ 1 Dia"): st.session_state.d = max(1, st.session_state.d - 1)
+    with c2:
+        st.markdown(f"<h3 style='text-align: center;'>{st.session_state.d} Dias</h3>", unsafe_allow_html=True)
+    with c3:
+        if st.button("➕ 1 Dia"): st.session_state.d += 1
 
-    data_vencimento = (datetime.now() + timedelta(days=st.session_state.dias_oferta)).strftime("%Y-%m-%d")
-    st.caption(f"📅 As ofertas enviadas agora expirarão em: {datetime.strptime(data_vencimento, '%Y-%m-%d').strftime('%d/%m/%Y')}")
-    st.divider()
-
+    dt_venc = (datetime.now() + timedelta(days=st.session_state.d)).strftime("%Y-%m-%d")
+    
     if "jk" not in st.session_state: st.session_state.jk = 0
-    fj = st.file_uploader("Subir Jornal de Ofertas", type="pdf", key=f"j_{st.session_state.jk}")
-    
-    if fj and st.button("🚀 ATIVAR JORNAL AGORA"):
-        with st.spinner("Processando..."):
-            dfj = extrair_pdf(fj)
-            if not dfj.empty:
-                for _, r in dfj.iterrows():
-                    db.execute("INSERT OR IGNORE INTO jornal (sku, produto, preco_oferta, validade) VALUES (?,?,?,?)", 
-                              (r['sku'], r['produto'], r['preco'], data_vencimento))
-                db.commit()
-                st.success(f"Sucesso! {len(dfj)} itens ativados por {st.session_state.dias_oferta} dias.")
-                st.session_state.jk += 1
-                st.rerun()
+    fj = st.file_uploader("Subir Jornal", type="pdf", key=f"j_{st.session_state.jk}")
+    if fj and st.button("🚀 ATIVAR OFERTAS"):
+        dfj = extrair_pdf(fj)
+        if not dfj.empty:
+            for _, r in dfj.iterrows():
+                db.execute("INSERT OR IGNORE INTO jornal (sku, produto, preco_oferta, validade) VALUES (?,?,?,?)", (r['sku'], r['produto'], r['preco'], dt_venc))
+            db.commit()
+            st.success("Jornal Ativado!")
+            st.session_state.jk += 1
+            st.rerun()
 
 with t3:
-    # --- CRUZAMENTO E LÓGICA DE ANÁLISE ---
-    db.execute("DELETE FROM jornal WHERE validade < DATE('now')")
-    db.commit()
-    
-    q = """SELECT h.cliente, h.fone, j.produto, h.preco as antigo, j.preco_oferta as novo, j.validade 
+    # CRUZAMENTO SEM EXCLUSÃO AUTOMÁTICA (MUITO MAIS LEVE)
+    hoje = datetime.now().strftime("%Y-%m-%d")
+    q = f"""SELECT h.cliente, h.fone, j.produto, h.preco as antigo, j.preco_oferta as novo, j.validade 
            FROM jornal j INNER JOIN historico h ON j.sku = h.sku 
            WHERE j.preco_oferta < h.preco GROUP BY h.cliente, j.sku"""
     df_c = pd.read_sql(q, db)
     
     if not df_c.empty:
-        st.subheader("🔥 Ofertas que os clientes já compraram mais caro")
+        # Alerta visual para itens vencidos
+        df_c['Status'] = df_c['validade'].apply(lambda x: "⚠️ VENCIDO" if x < hoje else "✅ ATIVA")
         st.dataframe(df_c, use_container_width=True)
     else:
-        st.warning("Sem cruzamento no momento. Certifique-se de ter pedidos no histórico e ofertas ativas.")
+        st.warning("Nenhuma oferta coincide com o histórico.")
 
 with t4:
-    # Histórico de 6 meses
     clis = pd.read_sql("SELECT DISTINCT cliente FROM historico", db)
     if not clis.empty:
-        sel = st.selectbox("Pesquisar Cliente:", ["Todos"] + clis['cliente'].tolist())
+        sel = st.selectbox("Cliente:", ["Todos"] + clis['cliente'].tolist())
         query = f"SELECT * FROM historico" + (f" WHERE cliente='{sel}'" if sel != "Todos" else "") + " ORDER BY id DESC"
         st.dataframe(pd.read_sql(query, db), use_container_width=True)
-        idx = st.number_input("ID p/ apagar registro:", min_value=0, step=1)
-        if st.button("Remover Item"):
-            db.execute(f"DELETE FROM historico WHERE id={idx}")
-            db.commit()
-            st.rerun()
+        idx = st.number_input("ID p/ apagar pedido:", min_value=0, step=1)
+        if st.button("Apagar"):
+            db.execute(f"DELETE FROM historico WHERE id={idx}"); db.commit(); st.rerun()
 
 with t5:
-    # Gestão de Ofertas
-    st.subheader("Jornais Ativos")
-    st.dataframe(pd.read_sql("SELECT * FROM jornal ORDER BY validade ASC", db), use_container_width=True)
-    idxj = st.number_input("ID p/ remover oferta:", min_value=0, step=1, key="del_j")
+    st.subheader("Gerenciar Ofertas")
+    hoje_t5 = datetime.now().strftime("%Y-%m-%d")
+    df_jor = pd.read_sql("SELECT * FROM jornal ORDER BY validade ASC", db)
+    if not df_jor.empty:
+        df_jor['Alerta'] = df_jor['validade'].apply(lambda x: "🚨 EXPIRADO - EXCLUIR" if x < hoje_t5 else "DENTRO DO PRAZO")
+        st.dataframe(df_jor, use_container_width=True)
+    
+    idxj = st.number_input("ID p/ excluir oferta manualmente:", min_value=0, step=1, key="del_j")
     if st.button("Excluir Oferta"):
-        db.execute(f"DELETE FROM jornal WHERE id={idxj}")
+        db.execute(f"DELETE FROM jornal WHERE id={idxj}"); db.commit(); st.rerun()
+    
+    if st.button("🔥 LIMPAR TODAS AS EXPIRADAS"):
+        db.execute(f"DELETE FROM jornal WHERE validade < '{hoje_t5}'")
         db.commit()
         st.rerun()
