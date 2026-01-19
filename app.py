@@ -6,21 +6,31 @@ import re
 import urllib.parse
 from datetime import datetime, timedelta
 
-# --- CONFIGURAÇÃO ---
-st.set_page_config(page_title="AM CRM Profissional", layout="wide")
+# --- CONFIGURAÇÃO E BLOQUEIO DE INTERFACE ---
+st.set_page_config(page_title="AM CRM Profissional", layout="wide", initial_sidebar_state="expanded")
+
+# CSS para esconder o menu do Streamlit, o rodapé e o botão de editar
+estilo_customizado = """
+    <style>
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+    .stDeployButton {display:none;}
+    [data-testid="stSidebarNav"] {padding-top: 0rem;}
+    </style>
+"""
+st.markdown(estilo_customizado, unsafe_allow_html=True)
 
 # --- BANCO DE DADOS (SQLite) ---
 conn = sqlite3.connect("crm_vendas.db", check_same_thread=False)
 cursor = conn.cursor()
 
-# Tabela de Histórico (6 meses)
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS historico (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     cliente TEXT, fone TEXT, sku TEXT, produto TEXT, preco REAL, data TEXT
 )""")
 
-# Tabela de Jornal com Validade
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS jornal_atual (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -28,13 +38,12 @@ CREATE TABLE IF NOT EXISTS jornal_atual (
 )""")
 conn.commit()
 
-# --- FUNÇÕES DE LIMPEZA ---
+# --- FUNÇÕES INTERNAS ---
 def limpar_jornal_vencido():
     hoje = datetime.now().strftime("%Y-%m-%d")
     cursor.execute("DELETE FROM jornal_atual WHERE data_vencimento < ?", (hoje,))
     conn.commit()
 
-# --- MOTORES DE LEITURA ---
 def ler_pedido_depecil(arquivo):
     dados = []
     with pdfplumber.open(arquivo) as pdf:
@@ -60,9 +69,8 @@ def ler_pedido_depecil(arquivo):
     return pd.DataFrame(dados)
 
 def ler_jornal_pdf(arquivo, dias_validade):
-    limpar_jornal_vencido() # Limpa antes de inserir novo
+    limpar_jornal_vencido()
     vencimento = (datetime.now() + timedelta(days=dias_validade)).strftime("%Y-%m-%d")
-    
     with pdfplumber.open(arquivo) as pdf:
         texto = "\n".join([p.extract_text() for p in pdf.pages if p.extract_text()])
     
@@ -73,47 +81,45 @@ def ler_jornal_pdf(arquivo, dias_validade):
                        (sku, prod.strip(), preco_f, vencimento))
     conn.commit()
 
-# --- INTERFACE ---
-limpar_jornal_vencido() # Garante que o app inicie sem ofertas vencidas
-st.title("🚀 AM Representações - CRM Inteligente")
+# --- INTERFACE DO USUÁRIO ---
+limpar_jornal_vencido()
+st.title("🚀 AM Representações - CRM")
 
-menu = st.sidebar.selectbox("Menu Principal", [
+menu = st.sidebar.selectbox("Navegação", [
     "📥 Importar Pedido", 
-    "📰 Importar Jornal", 
-    "🔥 Cruzamento de Ofertas", 
+    "📰 Jornal de Ofertas", 
+    "🔥 Cruzamento de Dados", 
     "👥 Clientes & Histórico", 
     "📈 Relatórios",
     "⚠️ Clientes Inativos"
 ])
 
-# 1) IMPORTAR PEDIDO
 if menu == "📥 Importar Pedido":
-    st.header("Importar Pedido PDF")
-    arq = st.file_uploader("Suba o pedido (Depecil)", type="pdf")
+    st.header("Importar Pedido")
+    arq = st.file_uploader("Suba o PDF (Padrão Depecil)", type="pdf")
     if arq:
         df = ler_pedido_depecil(arq)
         if not df.empty:
-            st.success(f"✅ Pedido: {df['cliente'].iloc[0]}")
-            st.dataframe(df[['sku', 'produto', 'preco']])
-            if st.button("Salvar no Histórico"):
+            st.success(f"✅ Identificado: {df['cliente'].iloc[0]}")
+            st.table(df[['sku', 'produto', 'preco']])
+            if st.button("Salvar no Banco de Dados"):
                 for _, r in df.iterrows():
                     cursor.execute("INSERT INTO historico (cliente, fone, sku, produto, preco, data) VALUES (?,?,?,?,?,?)",
                                    (r['cliente'], r['fone'], r['sku'], r['produto'], r['preco'], datetime.now().strftime("%Y-%m-%d")))
                 conn.commit()
                 st.balloons()
+        else: st.error("Erro ao ler PDF.")
 
-# 2) IMPORTAR JORNAL
-elif menu == "📰 Importar Jornal":
-    st.header("Importar Jornal de Ofertas")
-    validade = st.number_input("O jornal é válido por quantos dias?", min_value=1, max_value=30, value=7)
+elif menu == "📰 Jornal de Ofertas":
+    st.header("Cadastrar Novo Jornal")
+    validade = st.number_input("Validade (Dias):", min_value=1, max_value=30, value=7)
     arq_j = st.file_uploader("Suba o Jornal PDF", type="pdf")
     if arq_j:
-        if st.button("Processar e Ativar Ofertas"):
+        if st.button("Ativar Ofertas Agora"):
             ler_jornal_pdf(arq_j, validade)
-            st.success(f"✅ Jornal importado! As ofertas expiram em {validade} dias.")
+            st.success(f"✅ Ofertas ativadas por {validade} dias!")
 
-# 3) CRUZAMENTO DE OFERTAS
-elif menu == "🔥 Cruzamento de Ofertas":
+elif menu == "🔥 Cruzamento de Dados":
     st.header("Cruzamento Inteligente")
     df_j = pd.read_sql("SELECT * FROM jornal_atual", conn)
     df_h = pd.read_sql("SELECT * FROM historico", conn)
@@ -123,10 +129,8 @@ elif menu == "🔥 Cruzamento de Ofertas":
         ofertas = cruzado[cruzado['preco_oferta'] < cruzado['preco']].drop_duplicates(subset=['sku', 'cliente'])
         
         if not ofertas.empty:
-            cliente_sel = st.selectbox("Selecione o Cliente:", ofertas['cliente'].unique())
+            cliente_sel = st.selectbox("Cliente:", ofertas['cliente'].unique())
             df_envio = ofertas[ofertas['cliente'] == cliente_sel]
-            
-            st.write(f"### 🔥 {len(df_envio)} Ofertas encontradas!")
             st.table(df_envio[['produto_jornal', 'preco', 'preco_oferta']])
             
             msg = f"Olá, *{cliente_sel}*! 👋 Itens que você comprou baixaram de preço:\n\n"
@@ -134,12 +138,17 @@ elif menu == "🔥 Cruzamento de Ofertas":
                 msg += f"✅ *{r['produto_jornal']}*\nDe: R${r['preco']:.2f} por *R${r['preco_oferta']:.2f}*\n\n"
             
             link = f"https://wa.me/{df_envio['fone'].iloc[0]}?text={urllib.parse.quote(msg)}"
-            st.markdown(f"## [👉 ENVIAR PARA O WHATSAPP REAL]({link})")
-        else:
-            st.info("Nenhuma oferta atual é menor que o preço pago no histórico.")
-    else:
-        st.warning("Certifique-se de ter um Jornal Ativo e um Histórico populado.")
+            st.markdown(f"### [👉 ENVIAR WHATSAPP REAL]({link})")
+        else: st.info("Nenhuma oferta menor que o histórico.")
 
-# 4) RELATÓRIOS
 elif menu == "📈 Relatórios":
-    st
+    st.header("Estatísticas de Vendas")
+    df_r = pd.read_sql("SELECT produto, COUNT(*) as vendas FROM historico GROUP BY produto", conn)
+    if not df_r.empty:
+        st.bar_chart(df_r.set_index("produto"))
+
+elif menu == "⚠️ Clientes Inativos":
+    st.header("Clientes Inativos")
+    dias = st.slider("Dias parado:", 7, 60, 30)
+    inativos = pd.read_sql(f"SELECT cliente, MAX(data) as ultima, fone FROM historico GROUP BY cliente HAVING ultima <= DATE('now', '-{dias} days')", conn)
+    st.table(inativos)
