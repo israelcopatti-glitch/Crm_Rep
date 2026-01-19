@@ -5,8 +5,10 @@ import pdfplumber
 import re
 from datetime import datetime
 
-# --- BLOQUEIO DE INTERFACE ---
+# --- CONFIGURAÇÃO E BLOQUEIO DE INTERFACE ---
 st.set_page_config(page_title="AM CRM", layout="wide", initial_sidebar_state="collapsed")
+
+# CSS para esconder o menu, rodapé e a barra 'Gerenciar aplicativo'
 st.markdown("""
     <style>
     #MainMenu {visibility: hidden !important;}
@@ -19,7 +21,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- BANCO DE DADOS ---
-conn = sqlite3.connect("crm_am_v6.db", check_same_thread=False)
+conn = sqlite3.connect("crm_vendas_am.db", check_same_thread=False)
 cursor = conn.cursor()
 cursor.execute("""
     CREATE TABLE IF NOT EXISTS historico (
@@ -30,77 +32,66 @@ cursor.execute("""
 """)
 conn.commit()
 
-def extrair_depecil_real(arquivo):
+def extrair_dados_depecil(arquivo):
     dados = []
-    cliente = "Não Identificado"
+    cliente = "Desconhecido"
     
     with pdfplumber.open(arquivo) as pdf:
-        texto = "\n".join([p.extract_text() for p in pdf.pages if p.extract_text()])
+        texto_completo = ""
+        for pagina in pdf.pages:
+            texto_completo += pagina.extract_text() + "\n"
         
-        # Identifica o Cliente
-        m_cliente = re.search(r"Nome Fantasia:\s*(.*)", texto)
+        # 1. Identifica o Cliente (conforme o PDF real)
+        m_cliente = re.search(r"Nome Fantasia:\s*(.*)", texto_completo)
         if m_cliente:
             cliente = m_cliente.group(1).split('\n')[0].strip()
 
-        # Processa as linhas da tabela
-        linhas = texto.split("\n")
+        # 2. Processa as linhas do produto
+        linhas = texto_completo.split("\n")
         for linha in linhas:
-            # Verifica se a linha começa com o código do produto (ex: 37050)
-            if re.match(r"^\d{4,7}\s+", linha):
-                partes = linha.split()
+            # Detecta a linha que começa com o código (ex: 37050)
+            if re.match(r"^\d{4,6}\s+", linha):
+                # O PDF da Depecil mistura o nome com os números. 
+                # Vamos usar regex para separar o SKU, o Nome e os valores finais.
+                match = re.search(r"^(\d+)\s+(.*?)\s+(\d+,\d+)\s+(\d+,\d+)\s+(\w+)\s+(\d+,\d+)\s+([\d,.]+)\s+([\d,.]+)", linha)
                 
-                # O SKU é o primeiro elemento
-                [span_3](start_span)sku = partes[0][span_3](end_span)
-                
-                # Preços e Quantidades sempre têm vírgula no seu PDF
-                # Vamos identificar onde começam os valores numéricos de impostos (0,00)
-                indices_virgula = [i for i, p in enumerate(partes) if "," in p]
-                
-                if len(indices_virgula) >= 4:
-                    # O Nome do Produto está entre o SKU e o primeiro valor com vírgula (IPI)
-                    idx_ipi = indices_virgula[0]
-                    [span_4](start_span)nome_prod = " ".join(partes[1:idx_ipi])[span_4](end_span)
+                if match:
+                    sku = match.group(1)
+                    nome_prod = match.group(2)
+                    quantidade = float(match.group(6).replace(",", "."))
+                    v_unitario = float(match.group(7).replace(".", "").replace(",", "."))
                     
-                    try:
-                        # [span_5](start_span)No seu PDF[span_5](end_span): 
-                        # Qtde é o valor antes do V. Unit.
-                        # V. Unit é o penúltimo valor com vírgula
-                        qtd_raw = partes[indices_virgula[-3]] # Ex: 60,00
-                        val_raw = partes[indices_virgula[-2]] # Ex: 31,6236
-                        
-                        quantidade = float(qtd_raw.replace(".", "").replace(",", "."))
-                        preco_unit = float(val_raw.replace(".", "").replace(",", "."))
-                        
-                        dados.append({
-                            "Cód/SKU": sku,
-                            "Produto": nome_prod,
-                            "Quantidade": quantidade,
-                            "Preço Pago": preco_unit,
-                            "Cliente": cliente
-                        })
-                    except:
-                        continue
+                    dados.append({
+                        "SKU": sku,
+                        "Produto": nome_prod,
+                        "Quantidade": quantidade,
+                        "Preço": v_unitario,
+                        "Cliente": cliente
+                    })
     return pd.DataFrame(dados)
 
-# --- INTERFACE USUÁRIO ---
-st.title("📦 AM Representações - CRM")
+# --- INTERFACE ---
+st.title("🚀 AM Representações - CRM")
 
-arq = st.file_uploader("Suba o PDF do Pedido Depecil", type="pdf")
+arquivo_pdf = st.file_uploader("Upload do Pedido Depecil", type="pdf")
 
-if arq:
-    df = extrair_depecil_real(arq)
+if arquivo_pdf:
+    df = extrair_dados_depecil(arquivo_pdf)
     if not df.empty:
-        st.success(f"✅ Pedido de: {df['Cliente'].iloc[0]}")
-        # Exibe a tabela com as colunas que você precisava
-        st.table(df[["Cód/SKU", "Produto", "Quantidade", "Preço Pago"]])
+        st.success(f"✅ Cliente Identificado: {df['Cliente'].iloc[0]}")
+        
+        # Exibe os dados exatamente como você precisa
+        st.table(df[["SKU", "Produto", "Quantidade", "Preço"]])
         
         if st.button("💾 Salvar no Histórico"):
             for _, r in df.iterrows():
                 cursor.execute("""
                     INSERT INTO historico (cliente, sku, produto, quantidade, preco, data) 
                     VALUES (?, ?, ?, ?, ?, DATE('now'))
-                """, (r['Cliente'], r['Cód/SKU'], r['Produto'], r['Quantidade'], r['Preço Pago']))
+                """, (r['Cliente'], r['SKU'], r['Produto'], r['Quantidade'], r['Preço']))
             conn.commit()
+            st.balloons()
             st.success("Dados salvos com sucesso!")
     else:
-        st.error("O sistema não conseguiu processar as linhas deste PDF.")
+        st.error("Não foi possível extrair os dados. Verifique se o PDF é o original da Depecil.")
+
