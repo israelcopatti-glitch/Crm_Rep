@@ -1,4 +1,3 @@
-
 import sqlite3
 
 conn = sqlite3.connect("crm.db", check_same_thread=False)
