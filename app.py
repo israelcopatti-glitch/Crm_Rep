@@ -4,104 +4,142 @@ import sqlite3
 import pdfplumber
 import re
 import urllib.parse
-from fpdf import FPDF
-from datetime import datetime
+from datetime import datetime, timedelta
 
-# Configuração Inicial
-st.set_page_config(page_title="AM CRM", layout="wide")
+# --- CONFIGURAÇÃO ---
+st.set_page_config(page_title="AM CRM Profissional", layout="wide")
 
-# Conexão com Banco de Dados
-conn = sqlite3.connect("crm_dados.db", check_same_thread=False)
-c = conn.cursor()
-c.execute("CREATE TABLE IF NOT EXISTS historico (id INTEGER PRIMARY KEY AUTOINCREMENT, cliente TEXT, fone TEXT, sku TEXT, produto TEXT, preco REAL, data TEXT)")
+# --- BANCO DE DADOS (SQLite) ---
+conn = sqlite3.connect("crm_vendas.db", check_same_thread=False)
+cursor = conn.cursor()
+
+# Tabela de Histórico (6 meses)
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS historico (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cliente TEXT, fone TEXT, sku TEXT, produto TEXT, preco REAL, data TEXT
+)""")
+
+# Tabela de Jornal com Validade
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS jornal_atual (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sku TEXT, produto_jornal TEXT, preco_oferta REAL, data_vencimento TEXT
+)""")
 conn.commit()
 
-# --- FUNÇÃO DE LEITURA DEPECIL ---
-def ler_pdf_depecil(arquivo):
-    dados = []
-    cliente = "Desconhecido"
-    fone = ""
-    
-    with pdfplumber.open(arquivo) as pdf:
-        texto = ""
-        for pagina in pdf.pages:
-            texto += pagina.extract_text() + "\n"
-            
-        # Busca Cliente e Fone
-        m_cliente = re.search(r"Nome Fantasia:\s*(.*)", texto)
-        if m_cliente: cliente = m_cliente.group(1).split("\n")[0].strip()
-        
-        m_fone = re.search(r"Fone:\s*(\d+)", texto)
-        if m_fone: fone = m_fone.group(1).strip()
+# --- FUNÇÕES DE LIMPEZA ---
+def limpar_jornal_vencido():
+    hoje = datetime.now().strftime("%Y-%m-%d")
+    cursor.execute("DELETE FROM jornal_atual WHERE data_vencimento < ?", (hoje,))
+    conn.commit()
 
-        # Busca Produtos (Ex: 37050 DOBRADICA...)
-        linhas = texto.split("\n")
-        for linha in linhas:
-            partes = linha.split()
-            # Se a linha começa com o código numérico (SKU)
-            if len(partes) > 5 and partes[0].isdigit():
-                sku = partes[0]
-                # O preço unitário na Depecil é o penúltimo ou antepenúltimo valor com vírgula
-                precos_encontrados = [p for p in partes if "," in p]
-                if len(precos_encontrados) >= 2:
-                    p_unit_raw = precos_encontrados[-2] # Pega o V. Unit.
-                    try:
-                        p_unit = float(p_unit_raw.replace(".", "").replace(",", "."))
-                        nome_prod = " ".join(partes[1:partes.index(precos_encontrados[0])])
-                        dados.append({
-                            "SKU": sku, 
-                            "Produto": nome_prod, 
-                            "Preço": p_unit, 
-                            "Cliente": cliente, 
-                            "Fone": fone
-                        })
-                    except: continue
+# --- MOTORES DE LEITURA ---
+def ler_pedido_depecil(arquivo):
+    dados = []
+    with pdfplumber.open(arquivo) as pdf:
+        texto = "\n".join([p.extract_text() for p in pdf.pages if p.extract_text()])
+    
+    cliente = re.search(r"Nome Fantasia:\s*(.*)", texto)
+    cliente = cliente.group(1).split('\n')[0].strip() if cliente else "Cliente"
+    fone = re.search(r"Fone:\s*([\d\s\-]+)", texto)
+    fone = "".join(re.findall(r'\d+', fone.group(1))) if fone else ""
+    if fone and not fone.startswith("55"): fone = "55" + fone
+
+    for linha in texto.split("\n"):
+        partes = linha.split()
+        if len(partes) >= 6 and partes[0].isdigit():
+            sku = partes[0]
+            precos = [p for p in partes if "," in p]
+            if len(precos) >= 2:
+                try:
+                    p_unit = float(precos[-2].replace(".", "").replace(",", "."))
+                    nome_prod = " ".join(partes[1:partes.index(precos[0])])
+                    dados.append({"sku": sku, "produto": nome_prod, "preco": p_unit, "cliente": cliente, "fone": fone})
+                except: continue
     return pd.DataFrame(dados)
 
-# --- INTERFACE ---
-st.title("🚀 AM Representações - CRM")
-
-menu = st.sidebar.selectbox("Menu", ["📥 Importar Pedido", "🔥 Comparar Ofertas", "👥 Clientes", "📈 Relatórios"])
-
-if menu == "📥 Importar Pedido":
-    st.header("Importar Pedido (Depecil)")
-    arq = st.file_uploader("Suba o PDF aqui", type="pdf")
+def ler_jornal_pdf(arquivo, dias_validade):
+    limpar_jornal_vencido() # Limpa antes de inserir novo
+    vencimento = (datetime.now() + timedelta(days=dias_validade)).strftime("%Y-%m-%d")
     
+    with pdfplumber.open(arquivo) as pdf:
+        texto = "\n".join([p.extract_text() for p in pdf.pages if p.extract_text()])
+    
+    itens = re.findall(r"(\d{1,6})\s+(.*?)\s+.*?([\d,]{2,})$", texto, re.MULTILINE)
+    for sku, prod, preco in itens:
+        preco_f = float(preco.replace('.', '').replace(',', '.'))
+        cursor.execute("INSERT INTO jornal_atual (sku, produto_jornal, preco_oferta, data_vencimento) VALUES (?,?,?,?)",
+                       (sku, prod.strip(), preco_f, vencimento))
+    conn.commit()
+
+# --- INTERFACE ---
+limpar_jornal_vencido() # Garante que o app inicie sem ofertas vencidas
+st.title("🚀 AM Representações - CRM Inteligente")
+
+menu = st.sidebar.selectbox("Menu Principal", [
+    "📥 Importar Pedido", 
+    "📰 Importar Jornal", 
+    "🔥 Cruzamento de Ofertas", 
+    "👥 Clientes & Histórico", 
+    "📈 Relatórios",
+    "⚠️ Clientes Inativos"
+])
+
+# 1) IMPORTAR PEDIDO
+if menu == "📥 Importar Pedido":
+    st.header("Importar Pedido PDF")
+    arq = st.file_uploader("Suba o pedido (Depecil)", type="pdf")
     if arq:
-        df = ler_pdf_depecil(arq)
+        df = ler_pedido_depecil(arq)
         if not df.empty:
-            st.success(f"✅ Pedido de: {df['Cliente'].iloc[0]}")
-            st.dataframe(df[["SKU", "Produto", "Preço"]])
-            
-            if st.button("💾 Salvar no Histórico"):
+            st.success(f"✅ Pedido: {df['cliente'].iloc[0]}")
+            st.dataframe(df[['sku', 'produto', 'preco']])
+            if st.button("Salvar no Histórico"):
                 for _, r in df.iterrows():
-                    c.execute("INSERT INTO historico (cliente, fone, sku, produto, preco, data) VALUES (?,?,?,?,?,?)",
-                              (r['Cliente'], r['Fone'], r['SKU'], r['Produto'], r['Preço'], datetime.now().strftime("%Y-%m-%d")))
+                    cursor.execute("INSERT INTO historico (cliente, fone, sku, produto, preco, data) VALUES (?,?,?,?,?,?)",
+                                   (r['cliente'], r['fone'], r['sku'], r['produto'], r['preco'], datetime.now().strftime("%Y-%m-%d")))
                 conn.commit()
                 st.balloons()
-        else:
-            st.error("❌ Não encontrei os itens. Verifique se o PDF é o original da Depecil.")
 
-elif menu == "🔥 Comparar Ofertas":
-    st.header("Comparar com Jornal de Ofertas")
-    arq_jornal = st.file_uploader("Suba o PDF do Jornal", type="pdf")
+# 2) IMPORTAR JORNAL
+elif menu == "📰 Importar Jornal":
+    st.header("Importar Jornal de Ofertas")
+    validade = st.number_input("O jornal é válido por quantos dias?", min_value=1, max_value=30, value=7)
+    arq_j = st.file_uploader("Suba o Jornal PDF", type="pdf")
+    if arq_j:
+        if st.button("Processar e Ativar Ofertas"):
+            ler_jornal_pdf(arq_j, validade)
+            st.success(f"✅ Jornal importado! As ofertas expiram em {validade} dias.")
+
+# 3) CRUZAMENTO DE OFERTAS
+elif menu == "🔥 Cruzamento de Ofertas":
+    st.header("Cruzamento Inteligente")
+    df_j = pd.read_sql("SELECT * FROM jornal_atual", conn)
+    df_h = pd.read_sql("SELECT * FROM historico", conn)
     
-    if arq_jornal:
-        st.info("Função de cruzamento ativada. O sistema buscará preços menores que o histórico.")
-        # Lógica de comparação simplificada para evitar erros de memória
-        historico_completo = pd.read_sql("SELECT * FROM historico", conn)
-        if not historico_completo.empty:
-            st.write("Histórico carregado. Pronto para comparar.")
+    if not df_j.empty and not df_h.empty:
+        cruzado = pd.merge(df_j, df_h, on="sku")
+        ofertas = cruzado[cruzado['preco_oferta'] < cruzado['preco']].drop_duplicates(subset=['sku', 'cliente'])
+        
+        if not ofertas.empty:
+            cliente_sel = st.selectbox("Selecione o Cliente:", ofertas['cliente'].unique())
+            df_envio = ofertas[ofertas['cliente'] == cliente_sel]
+            
+            st.write(f"### 🔥 {len(df_envio)} Ofertas encontradas!")
+            st.table(df_envio[['produto_jornal', 'preco', 'preco_oferta']])
+            
+            msg = f"Olá, *{cliente_sel}*! 👋 Itens que você comprou baixaram de preço:\n\n"
+            for _, r in df_envio.iterrows():
+                msg += f"✅ *{r['produto_jornal']}*\nDe: R${r['preco']:.2f} por *R${r['preco_oferta']:.2f}*\n\n"
+            
+            link = f"https://wa.me/{df_envio['fone'].iloc[0]}?text={urllib.parse.quote(msg)}"
+            st.markdown(f"## [👉 ENVIAR PARA O WHATSAPP REAL]({link})")
         else:
-            st.warning("O histórico está vazio. Importe um pedido primeiro.")
+            st.info("Nenhuma oferta atual é menor que o preço pago no histórico.")
+    else:
+        st.warning("Certifique-se de ter um Jornal Ativo e um Histórico populado.")
 
-elif menu == "👥 Clientes":
-    st.header("Base de Clientes")
-    df_c = pd.read_sql("SELECT DISTINCT cliente, fone FROM historico", conn)
-    st.table(df_c)
-
+# 4) RELATÓRIOS
 elif menu == "📈 Relatórios":
-    st.header("Relatório de Vendas")
-    df_r = pd.read_sql("SELECT produto, COUNT(*) as vendas FROM historico GROUP BY produto", conn)
-    if not df_r.empty:
-        st.bar_chart(df_r.set_index("produto"))
+    st
