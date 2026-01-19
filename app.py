@@ -22,28 +22,26 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- 2. BANCO DE DADOS (COM VALIDAÇÃO ANTI-DUPLICIDADE) ---
+# --- 2. BANCO DE DADOS (COM TRAVAS DE DUPLICIDADE) ---
 def conectar_db():
-    conn = sqlite3.connect("crm_am_v2026_final_v2.db", check_same_thread=False)
+    conn = sqlite3.connect("crm_am_v2026_final_v5.db", check_same_thread=False)
     c = conn.cursor()
-    # Histórico: Adicionado UNIQUE para evitar duplicar o mesmo item no mesmo dia
+    # Unique para evitar duplicar item de cliente no mesmo dia
     c.execute("""CREATE TABLE IF NOT EXISTS historico (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, 
-        cliente TEXT, fone TEXT, sku TEXT, produto TEXT, 
-        qtde REAL, preco REAL, data TEXT,
-        UNIQUE(cliente, sku, data))""")
-    
-    # Jornal: Adicionado UNIQUE para não duplicar oferta do mesmo produto no mesmo jornal
+        id INTEGER PRIMARY KEY AUTOINCREMENT, cliente TEXT, fone TEXT, 
+        sku TEXT, produto TEXT, qtde REAL, preco REAL, data TEXT,
+        UNIQUE(cliente, sku, data, preco))""")
+    # Unique para evitar duplicar oferta no mesmo período
     c.execute("""CREATE TABLE IF NOT EXISTS jornal (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        sku TEXT, produto TEXT, preco_oferta REAL, validade TEXT,
-        UNIQUE(sku, validade))""")
+        id INTEGER PRIMARY KEY AUTOINCREMENT, sku TEXT, produto TEXT, 
+        preco_oferta REAL, validade TEXT,
+        UNIQUE(sku, preco_oferta, validade))""")
     conn.commit()
     return conn
 
 conn = conectar_db()
 
-# --- 3. MOTOR DE LEITURA CALIBRADO ---
+# --- 3. MOTOR DE LEITURA (NOME, QTD E FONE DO PDF) ---
 def extrair_dados(file):
     dados = []
     cliente, fone = "Desconhecido", ""
@@ -69,18 +67,21 @@ def extrair_dados(file):
 # --- 4. INTERFACE ---
 st.title("🚀 AM Representações")
 
-tab1, tab2, tab3, tab4 = st.tabs(["📥 Importar Pedido", "📰 Jornal de Ofertas", "🔍 Cruzamento", "📊 Histórico de Clientes"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["📥 Novo Pedido", "📰 Novo Jornal", "🔥 Cruzamento", "📊 Histórico Pedidos", "📋 Ver Ofertas"])
 
-# --- ABA 1: PEDIDOS ---
+# --- TAB 1: IMPORTAR PEDIDO ---
 with tab1:
-    st.subheader("Novo Pedido Depecil")
-    arq = st.file_uploader("Suba o PDF do Pedido", type="pdf")
+    st.subheader("Importar Pedido Depecil")
+    # Usamos o session_state para limpar o campo após salvar
+    if "reset_pedido" not in st.session_state: st.session_state.reset_pedido = 0
+    
+    arq = st.file_uploader("Suba o PDF", type="pdf", key=f"ped_{st.session_state.reset_pedido}")
     if arq:
         df = extrair_dados(arq)
         if not df.empty:
             st.success(f"✅ Pedido: {df['cliente'].iloc[0]}")
             st.table(df[["sku", "produto", "qtde", "preco"]])
-            if st.button("💾 Confirmar e Salvar"):
+            if st.button("💾 Salvar e Finalizar"):
                 c = conn.cursor()
                 sucesso, erros = 0, 0
                 for _, r in df.iterrows():
@@ -91,14 +92,17 @@ with tab1:
                     except sqlite3.IntegrityError: erros += 1
                 conn.commit()
                 if sucesso > 0: st.success(f"Salvo: {sucesso} itens."); st.balloons()
-                if erros > 0: st.warning(f"Ignorado: {erros} itens já existiam para hoje.")
+                if erros > 0: st.warning(f"Ignorado: {erros} itens já existiam no histórico para hoje.")
+                st.session_state.reset_pedido += 1 # Limpa a tela
+                st.rerun()
 
-# --- ABA 2: JORNAL ---
+# --- TAB 2: IMPORTAR JORNAL ---
 with tab2:
-    st.subheader("Cadastrar Jornal (Validade Individual)")
+    st.subheader("Importar Jornal de Ofertas")
+    if "reset_jornal" not in st.session_state: st.session_state.reset_jornal = 0
     data_val = st.date_input("Válido até:", datetime.now() + timedelta(days=7))
-    arq_j = st.file_uploader("Suba o PDF do Jornal", type="pdf", key="jornal")
-    if arq_j and st.button("Ativar Ofertas"):
+    arq_j = st.file_uploader("PDF do Jornal", type="pdf", key=f"jor_{st.session_state.reset_jornal}")
+    if arq_j and st.button("Ativar Jornal"):
         df_j = extrair_dados(arq_j)
         if not df_j.empty:
             c = conn.cursor()
@@ -108,49 +112,47 @@ with tab2:
                               (r['sku'], r['produto'], r['preco'], data_val.strftime("%Y-%m-%d")))
                 except sqlite3.IntegrityError: pass
             conn.commit()
-            st.success(f"✅ Jornal ativado até {data_val.strftime('%d/%m/%Y')}!")
+            st.success("✅ Ofertas ativadas!")
+            st.session_state.reset_jornal += 1 # Limpa a tela
+            st.rerun()
 
-# --- ABA 3: CRUZAMENTO ---
+# --- TAB 3: CRUZAMENTO ---
 with tab3:
-    st.subheader("🔥 Oportunidades WhatsApp")
-    # Limpa vencidos
+    st.subheader("🔥 Oportunidades")
+    # Limpa vencidos antes de cruzar
     conn.execute("DELETE FROM jornal WHERE validade < ?", (datetime.now().strftime("%Y-%m-%d"),))
     df_h = pd.read_sql("SELECT * FROM historico", conn)
     df_o = pd.read_sql("SELECT * FROM jornal", conn)
     if not df_o.empty and not df_h.empty:
         cruzado = pd.merge(df_o, df_h, on="sku", suffixes=('_jor', '_hist'))
         oportunidades = cruzado[cruzado['preco_oferta'] < cruzado['preco']].drop_duplicates(subset=['cliente', 'sku'])
-        if not oportunidades.empty:
-            st.dataframe(oportunidades[['cliente', 'produto_jor', 'preco', 'preco_oferta', 'validade']])
-        else: st.info("Nenhuma oferta menor que o histórico encontrada.")
+        st.dataframe(oportunidades[['cliente', 'produto_jor', 'preco', 'preco_oferta', 'validade']])
+    else: st.info("Sem dados para cruzamento.")
 
-# --- ABA 4: HISTÓRICO ORGANIZADO ---
+# --- TAB 4: HISTÓRICO PEDIDOS ---
 with tab4:
-    st.subheader("📊 Gestão de Clientes e Pedidos")
-    
-    # Pesquisa de Cliente
+    st.subheader("📊 Histórico de Clientes (6 Meses)")
     clientes = pd.read_sql("SELECT DISTINCT cliente FROM historico", conn)
     if not clientes.empty:
-        cliente_busca = st.selectbox("🔍 Pesquisar Cliente:", ["Todos"] + clientes['cliente'].tolist())
+        sel = st.selectbox("Filtrar Cliente:", ["Todos"] + clientes['cliente'].tolist())
+        query = "SELECT * FROM historico" + (f" WHERE cliente = '{sel}'" if sel != "Todos" else "") + " ORDER BY data DESC"
+        df_h_ver = pd.read_sql(query, conn)
         
-        query = "SELECT * FROM historico"
-        if cliente_busca != "Todos":
-            query += f" WHERE cliente = '{cliente_busca}'"
-        query += " ORDER BY data DESC"
+        id_del_p = st.number_input("ID para excluir pedido:", min_value=0, step=1)
+        if st.button("🗑️ Excluir Item do Histórico"):
+            conn.execute(f"DELETE FROM historico WHERE id = {id_del_p}")
+            conn.commit(); st.rerun()
         
-        df_hist = pd.read_sql(query, conn)
-        
-        # Opção de Excluir Pedido
-        if not df_hist.empty:
-            st.write("---")
-            st.write("Selecione um item para excluir (Erro ou Duplicado):")
-            id_excluir = st.number_input("Digite o ID do item para remover:", min_value=0, step=1)
-            if st.button("🗑️ Excluir Item"):
-                conn.execute(f"DELETE FROM historico WHERE id = {id_excluir}")
-                conn.commit()
-                st.success(f"Item ID {id_excluir} removido!")
-                st.rerun()
-            
-            st.dataframe(df_hist[['id', 'data', 'cliente', 'produto', 'qtde', 'preco']], use_container_width=True)
-    else:
-        st.write("O histórico está vazio.")
+        st.dataframe(df_h_ver[['id', 'data', 'cliente', 'produto', 'qtde', 'preco']])
+
+# --- TAB 5: GESTÃO DE OFERTAS ---
+with tab5:
+    st.subheader("📋 Ofertas Ativas no Jornal")
+    df_jor_ver = pd.read_sql("SELECT * FROM jornal ORDER BY validade ASC", conn)
+    if not df_jor_ver.empty:
+        id_del_j = st.number_input("ID para excluir oferta:", min_value=0, step=1)
+        if st.button("🗑️ Excluir Oferta"):
+            conn.execute(f"DELETE FROM jornal WHERE id = {id_del_j}")
+            conn.commit(); st.rerun()
+        st.dataframe(df_jor_ver[['id', 'sku', 'produto', 'preco_oferta', 'validade']])
+    else: st.write("Nenhuma oferta cadastrada.")
