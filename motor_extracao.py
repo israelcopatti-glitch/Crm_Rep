@@ -5,7 +5,7 @@ from datetime import datetime
 
 DB = "crm.db"
 
-# ---------------- BANCO ----------------
+# ================= BANCO =================
 
 def conectar():
     return sqlite3.connect(DB)
@@ -49,12 +49,12 @@ def criar_tabelas():
     conn.commit()
     conn.close()
 
-# ---------------- UTIL ----------------
+# ================= UTIL =================
 
-def normalizar_preco(valor):
-    return float(valor.replace(".", "").replace(",", "."))
+def normalizar_preco(txt):
+    return float(txt.replace(".", "").replace(",", "."))
 
-# ---------------- FORMATO 2 — BLOCO PR ----------------
+# ================= JORNAL BLOCO PR =================
 
 def extrair_jornal_bloco_pr(pdf_path, validade, edicao):
     ofertas = []
@@ -67,30 +67,28 @@ def extrair_jornal_bloco_pr(pdf_path, validade, edicao):
 
             linhas = [l.strip() for l in texto.split("\n") if l.strip()]
             nome_atual = None
-            esperando_codigo = False
+            modo_pr = False
 
             for linha in linhas:
 
-                # Nome do produto
-                if linha.isupper() and len(linha) > 6:
+                if linha.isupper() and len(linha) > 5:
                     nome_atual = linha
-                    esperando_codigo = False
+                    modo_pr = False
 
-                # Marca bloco PR
                 elif linha == "R$ PR":
-                    esperando_codigo = True
+                    modo_pr = True
 
-                # Linha de código
-                elif esperando_codigo:
-                    m = re.match(r"^(\d+).*?(\d+,\d+)$", linha)
+                elif modo_pr:
+                    m = re.search(r"^(\d+).*?(\d+,\d+)$", linha)
                     if m and nome_atual:
                         codigo = m.group(1)
                         preco = normalizar_preco(m.group(2))
                         ofertas.append((codigo, nome_atual, preco, validade, edicao))
+                        modo_pr = False
 
     return ofertas
 
-# ---------------- FORMATO 1 — TABELA SC PR RS ----------------
+# ================= JORNAL TABELA =================
 
 def extrair_jornal_tabela(pdf_path, validade, edicao):
     ofertas = []
@@ -106,59 +104,51 @@ def extrair_jornal_tabela(pdf_path, validade, edicao):
 
             for linha in linhas:
 
-                # Nome do produto
                 if linha.isupper() and not linha.startswith("R$"):
                     nome_atual = linha
 
-                # Linha de dados
                 elif re.match(r"^\d+", linha) and nome_atual:
                     partes = linha.split()
                     if len(partes) >= 6:
                         codigo = partes[0]
-                        preco_pr = partes[-2]  # SC PR RS → PR é penúltimo
-                        ofertas.append((codigo, nome_atual, normalizar_preco(preco_pr), validade, edicao))
+                        preco_pr = partes[-2]
+                        ofertas.append(
+                            (codigo, nome_atual, normalizar_preco(preco_pr), validade, edicao)
+                        )
 
     return ofertas
 
-# ---------------- DETECTOR AUTOMÁTICO DE JORNAL ----------------
+# ================= DETECTOR =================
 
 def extrair_jornal(pdf_path, validade, edicao):
     with pdfplumber.open(pdf_path) as pdf:
         texto = pdf.pages[0].extract_text()
 
-    if "R$ SC R$ PR R$ RS" in texto:
-        print("Formato detectado: TABELA SC/PR/RS")
+    if "R$ SC" in texto and "R$ PR" in texto:
         return extrair_jornal_tabela(pdf_path, validade, edicao)
     elif "R$ PR" in texto:
-        print("Formato detectado: BLOCO PR")
         return extrair_jornal_bloco_pr(pdf_path, validade, edicao)
     else:
         raise Exception("Formato de jornal não reconhecido")
 
-# ---------------- PEDIDO REAL ----------------
+# ================= PEDIDO =================
 
 def extrair_pedido(pdf_path):
-    itens = []
-    cliente = {}
-    data = None
-
     with pdfplumber.open(pdf_path) as pdf:
-        texto = "\n".join(page.extract_text() for page in pdf.pages if page.extract_text())
+        texto = "\n".join(p.extract_text() for p in pdf.pages if p.extract_text())
 
-    # Cliente
+    cliente = {}
+    itens = []
+
     m = re.search(r"(\d+)\s-\s(.+?)\s+Nº Pedido", texto)
     if m:
         cliente["codigo"] = m.group(1)
         cliente["nome"] = m.group(2).strip()
 
-    # Data
     m = re.search(r"Data Emissão:\s(\d{2}/\d{2}/\d{4})", texto)
-    if m:
-        data = datetime.strptime(m.group(1), "%d/%m/%Y").date().isoformat()
+    data = datetime.strptime(m.group(1), "%d/%m/%Y").date().isoformat()
 
-    # Itens
-    linhas = texto.split("\n")
-    for linha in linhas:
+    for linha in texto.split("\n"):
         m = re.match(
             r"^(\d+)\s+(.+?)\s+PC\s+([\d,]+)\s+([\d,]+)\s+([\d,]+)",
             linha
@@ -169,18 +159,17 @@ def extrair_pedido(pdf_path):
             qtde = normalizar_preco(m.group(3))
             unit = normalizar_preco(m.group(4))
             total = normalizar_preco(m.group(5))
-
             itens.append((codigo, nome, qtde, unit, total))
 
     return cliente, data, itens
 
-# ---------------- GRAVAÇÃO ----------------
+# ================= SALVAR =================
 
 def salvar_ofertas(ofertas):
     conn = conectar()
     cur = conn.cursor()
     cur.executemany("""
-        INSERT INTO OFERTAS(codigo_prod,nome_prod,preco_pr,validade,edicao)
+        INSERT INTO OFERTAS (codigo_prod,nome_prod,preco_pr,validade,edicao)
         VALUES (?,?,?,?,?)
     """, ofertas)
     conn.commit()
@@ -190,31 +179,20 @@ def salvar_pedido(cliente, data, itens):
     conn = conectar()
     cur = conn.cursor()
 
-    cur.execute("INSERT INTO CLIENTES(codigo,nome) VALUES (?,?)",
+    cur.execute("INSERT INTO CLIENTES (codigo,nome) VALUES (?,?)",
                 (cliente["codigo"], cliente["nome"]))
     cliente_id = cur.lastrowid
 
     for codigo, nome, qtde, unit, total in itens:
         cur.execute("""
-            INSERT INTO PEDIDOS(cliente_id,data,codigo_prod,nome_prod,qtde,preco_unit,valor_total)
+            INSERT INTO PEDIDOS
+            (cliente_id,data,codigo_prod,nome_prod,qtde,preco_unit,valor_total)
             VALUES (?,?,?,?,?,?,?)
         """, (cliente_id, data, codigo, nome, qtde, unit, total))
 
     conn.commit()
     conn.close()
 
-# ---------------- TESTE LOCAL ----------------
+# ================= INIT =================
 
-if __name__ == "__main__":
-    criar_tabelas()
-
-    print("Importando jornal PR...")
-    ofertas = extrair_jornal("Compilado Semanais PR 19.01 a 23.01.pdf",
-                             "23/01/2026", "PR-SEMANA")
-    salvar_ofertas(ofertas)
-    print("Ofertas importadas:", len(ofertas))
-
-    print("Importando pedido real...")
-    cliente, data, itens = extrair_pedido("DOC-20260115-WA0057..pdf")
-    salvar_pedido(cliente, data, itens)
-    print("Pedido importado:", len(itens), "itens")
+criar_tabelas()
