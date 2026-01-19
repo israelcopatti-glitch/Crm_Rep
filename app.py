@@ -1,4 +1,3 @@
-
 import streamlit as st
 from datetime import date
 from db import conn, cur
@@ -10,11 +9,7 @@ st.title("📊 CRM Representante Comercial")
 
 menu = st.radio("Menu", [
     "Importar Pedido DEPECIL",
-    "Jornal de Ofertas PR",
-    "Histórico",
-    "Cruzamento",
-    "Relatórios",
-    "Alertas"
+    "Jornal de Ofertas PR"
 ])
 
 # ================= PEDIDO =================
@@ -70,6 +65,3 @@ elif menu == "Jornal de Ofertas PR":
 
         conn.commit()
         st.success(f"{len(ofertas)} ofertas importadas!")
-
-else:
-    st.info("Módulo em desenvolvimento")
