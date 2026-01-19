@@ -10,53 +10,70 @@ DB = "crm.db"
 def conectar():
     return sqlite3.connect(DB)
 
-# ================= AUTO-CORRECAO BANCO =================
-
-def garantir_coluna(cur, tabela, coluna, tipo):
-    cur.execute(f"PRAGMA table_info({tabela})")
-    colunas = [c[1] for c in cur.fetchall()]
-    if coluna not in colunas:
-        cur.execute(f"ALTER TABLE {tabela} ADD COLUMN {coluna} {tipo}")
+# ================= BANCO AUTO-REPARAVEL =================
 
 def preparar_banco():
     conn = conectar()
     cur = conn.cursor()
 
+    # cria tabelas base
     cur.execute("""
     CREATE TABLE IF NOT EXISTS CLIENTES (
-        id INTEGER PRIMARY KEY AUTOINCREMENT
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        codigo TEXT,
+        nome TEXT
     )
     """)
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS PEDIDOS (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        cliente_id INTEGER
+        cliente_id INTEGER,
+        data TEXT,
+        codigo_prod TEXT,
+        nome_prod TEXT,
+        qtde REAL,
+        preco_unit REAL,
+        valor_total REAL
     )
     """)
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS OFERTAS (
-        id INTEGER PRIMARY KEY AUTOINCREMENT
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        codigo_prod TEXT,
+        nome_prod TEXT,
+        preco_pr REAL,
+        validade TEXT,
+        edicao TEXT
     )
     """)
 
-    garantir_coluna(cur, "CLIENTES", "codigo", "TEXT")
-    garantir_coluna(cur, "CLIENTES", "nome", "TEXT")
+    # verifica estrutura real da tabela CLIENTES
+    cur.execute("PRAGMA table_info(CLIENTES)")
+    colunas = [c[1] for c in cur.fetchall()]
 
-    garantir_coluna(cur, "PEDIDOS", "cliente_id", "INTEGER")
-    garantir_coluna(cur, "PEDIDOS", "data", "TEXT")
-    garantir_coluna(cur, "PEDIDOS", "codigo_prod", "TEXT")
-    garantir_coluna(cur, "PEDIDOS", "nome_prod", "TEXT")
-    garantir_coluna(cur, "PEDIDOS", "qtde", "REAL")
-    garantir_coluna(cur, "PEDIDOS", "preco_unit", "REAL")
-    garantir_coluna(cur, "PEDIDOS", "valor_total", "REAL")
+    # se banco antigo, reconstrói automaticamente
+    if "codigo" not in colunas or "nome" not in colunas:
+        cur.execute("ALTER TABLE CLIENTES RENAME TO CLIENTES_OLD")
 
-    garantir_coluna(cur, "OFERTAS", "codigo_prod", "TEXT")
-    garantir_coluna(cur, "OFERTAS", "nome_prod", "TEXT")
-    garantir_coluna(cur, "OFERTAS", "preco_pr", "REAL")
-    garantir_coluna(cur, "OFERTAS", "validade", "TEXT")
-    garantir_coluna(cur, "OFERTAS", "edicao", "TEXT")
+        cur.execute("""
+        CREATE TABLE CLIENTES (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            codigo TEXT,
+            nome TEXT
+        )
+        """)
+
+        cur.execute("""
+        INSERT INTO CLIENTES (codigo, nome)
+        SELECT
+            COALESCE(codigo, 'DESCONHECIDO'),
+            COALESCE(nome, 'CLIENTE NAO IDENTIFICADO')
+        FROM CLIENTES_OLD
+        """)
+
+        cur.execute("DROP TABLE CLIENTES_OLD")
 
     conn.commit()
     conn.close()
@@ -69,6 +86,8 @@ def normalizar_preco(txt):
 # ================= JORNAL =================
 
 def extrair_jornal(pdf_path, validade, edicao):
+    preparar_banco()
+
     with pdfplumber.open(pdf_path) as pdf:
         texto = pdf.pages[0].extract_text()
 
@@ -86,6 +105,7 @@ def extrair_jornal_bloco_pr(pdf_path, validade, edicao):
             texto = page.extract_text()
             if not texto:
                 continue
+
             linhas = [l.strip() for l in texto.split("\n") if l.strip()]
             nome_atual = None
             modo_pr = False
@@ -116,6 +136,7 @@ def extrair_jornal_tabela(pdf_path, validade, edicao):
             texto = page.extract_text()
             if not texto:
                 continue
+
             linhas = [l.strip() for l in texto.split("\n") if l.strip()]
             nome_atual = None
 
@@ -137,6 +158,8 @@ def extrair_jornal_tabela(pdf_path, validade, edicao):
 # ================= PEDIDO =================
 
 def extrair_pedido(pdf_path):
+    preparar_banco()
+
     with pdfplumber.open(pdf_path) as pdf:
         texto = "\n".join(p.extract_text() for p in pdf.pages if p.extract_text())
 
@@ -162,3 +185,49 @@ def extrair_pedido(pdf_path):
                 m.group(2).strip(),
                 normalizar_preco(m.group(3)),
                 normalizar_preco(m.group(4)),
+                normalizar_preco(m.group(5))
+            ))
+
+    return cliente, data, itens
+
+# ================= SALVAR =================
+
+def salvar_pedido(cliente, data, itens):
+    preparar_banco()
+    conn = conectar()
+    cur = conn.cursor()
+
+    codigo = cliente.get("codigo", "DESCONHECIDO")
+    nome = cliente.get("nome", "CLIENTE NAO IDENTIFICADO")
+
+    cur.execute(
+        "INSERT INTO CLIENTES (codigo,nome) VALUES (?,?)",
+        (codigo, nome)
+    )
+    cliente_id = cur.lastrowid
+
+    for codigo_prod, nome_prod, qtde, unit, total in itens:
+        cur.execute("""
+            INSERT INTO PEDIDOS
+            (cliente_id,data,codigo_prod,nome_prod,qtde,preco_unit,valor_total)
+            VALUES (?,?,?,?,?,?,?)
+        """, (cliente_id, data, codigo_prod, nome_prod, qtde, unit, total))
+
+    conn.commit()
+    conn.close()
+
+def salvar_ofertas(ofertas):
+    preparar_banco()
+    conn = conectar()
+    cur = conn.cursor()
+
+    cur.executemany("""
+        INSERT INTO OFERTAS
+        (codigo_prod,nome_prod,preco_pr,validade,edicao)
+        VALUES (?,?,?,?,?)
+    """, ofertas)
+
+    conn.commit()
+    conn.close()
+
+preparar_banco()
