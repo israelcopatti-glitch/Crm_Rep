@@ -32,14 +32,29 @@ def extrair_pedido_pdf(file):
                     # Ajustando a extração dos campos: código, nome, quantidade, preço e total
                     codigo = re.sub(r"\D", "", row[0])  # Retira qualquer caractere não numérico no código
                     nome = row[1].strip()  # Nome do produto
-                    qtde = float(row[2].replace(",", "."))  # Quantidade do produto (com conversão de vírgula para ponto)
-                    preco = float(row[3].replace(".", "").replace(",", "."))  # Preço unitário
-                    total = qtde * preco  # Total do item (quantidade * preço)
+                    qtde = row[2]
+                    preco = row[3]
+                    total = row[4]
+
+                    # Verificando se os valores são numéricos e convertendo
+                    qtde = float(qtde.replace(",", ".")) if qtde.replace(",", "").replace(".", "").isdigit() else None
+                    preco = float(preco.replace(",", ".")) if preco.replace(",", "").replace(".", "").isdigit() else None
+                    total = float(total.replace(",", ".")) if total.replace(",", "").replace(".", "").isdigit() else None
+
+                    # Ignorando as linhas onde algum valor numérico não foi encontrado
+                    if qtde is None or preco is None or total is None:
+                        continue
 
                     # Adicionando o item à lista de itens
-                    itens.append({"codigo": codigo, "nome": nome, "qtde": qtde, "preco": preco, "total": total})
+                    itens.append({
+                        "codigo": codigo,
+                        "nome": nome,
+                        "qtde": qtde,
+                        "preco": preco,
+                        "total": total
+                    })
 
                 except Exception as e:
-                    print(f"Erro ao processar linha: {row}, erro: {e}")
+                    print(f"Erro ao processar linha: {row} | Erro: {e}")
     
     return cliente, itens  # Retorna as informações do cliente e os itens do pedido
