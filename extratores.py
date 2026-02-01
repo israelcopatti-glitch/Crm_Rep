@@ -29,8 +29,8 @@ def extrair_pedido_pdf(file):
             # Processando cada linha da tabela
             for row in tabela[1:]:  # Ignorando o cabeçalho da tabela
                 try:
-                    # Extraindo os dados dos itens
-                    codigo = re.sub(r"\D", "", row[0])  # Retira qualquer caractere não numérico
+                    # Ajustando a extração dos campos: código, nome, quantidade, preço e total
+                    codigo = re.sub(r"\D", "", row[0])  # Retira qualquer caractere não numérico no código
                     nome = row[1].strip()  # Nome do produto
                     qtde = float(row[2].replace(",", "."))  # Quantidade do produto (com conversão de vírgula para ponto)
                     preco = float(row[3].replace(".", "").replace(",", "."))  # Preço unitário
