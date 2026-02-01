@@ -4,67 +4,42 @@ import pandas as pd
 
 # ========= PEDIDOS PDF =========
 def extrair_pedido_pdf(file):
-    itens = []
-    cliente = {"codigo": None, "nome": None}
+    itens = []  # Lista para armazenar os itens do pedido
+    cliente = {"codigo": None, "nome": None}  # Dicionário para armazenar as informações do cliente
 
+    # Abrindo o arquivo PDF com pdfplumber
     with pdfplumber.open(file) as pdf:
         for page in pdf.pages:
-            texto = page.extract_text()
-            if not texto:
+            texto = page.extract_text()  # Extrai o texto da página
+            if not texto:  # Se não houver texto na página, ignora
                 continue
 
+            # Extraindo as informações do cliente
             for l in texto.split("\n"):
                 if "Cliente" in l and not cliente["nome"]:
                     cliente["nome"] = l.split(":")[-1].strip()
                 if "Código" in l and not cliente["codigo"]:
-                    cliente["codigo"] = re.sub(r"\D", "", l)
+                    cliente["codigo"] = re.sub(r"\D", "", l)  # Retira qualquer caractere não numérico
 
-            tabela = page.extract_table()
-            if not tabela:
+            # Extraindo a tabela de itens do pedido
+            tabela = page.extract_table()  # Extrai a tabela da página
+            if not tabela:  # Se não houver tabela, ignora
                 continue
 
-            for row in tabela[1:]:
+            # Processando cada linha da tabela
+            for row in tabela[1:]:  # Ignorando o cabeçalho da tabela
                 try:
-                    codigo = re.sub(r"\D", "", row[0])
-                    nome = row[1].strip()
-                    qtde = float(row[2].replace(",", "."))
-                    preco = float(row[3].replace(".", "").replace(",", "."))
-                    total = float(row[4].replace(".", "").replace(",", "."))
-                except:
-                    continue
+                    # Extraindo os dados dos itens
+                    codigo = re.sub(r"\D", "", row[0])  # Retira qualquer caractere não numérico
+                    nome = row[1].strip()  # Nome do produto
+                    qtde = float(row[2].replace(",", "."))  # Quantidade do produto (com conversão de vírgula para ponto)
+                    preco = float(row[3].replace(".", "").replace(",", "."))  # Preço unitário
+                    total = qtde * preco  # Total do item (quantidade * preço)
 
-                itens.append({
-                    "codigo": codigo,
-                    "nome": nome,
-                    "qtde": qtde,
-                    "preco": preco,
-                    "total": total
-                })
+                    # Adicionando o item à lista de itens
+                    itens.append({"codigo": codigo, "nome": nome, "qtde": qtde, "preco": preco, "total": total})
 
-    return cliente, itens
-
-
-# ========= JORNAL PR PDF =========
-def extrair_jornal_pdf(file):
-    lista = []
-
-    with pdfplumber.open(file) as pdf:
-        for page in pdf.pages:
-            texto = page.extract_text()
-            if not texto:
-                continue
-
-            nome_atual = None
-            for l in texto.split("\n"):
-                l = l.strip()
-
-                if l.isupper() and len(l) > 5:
-                    nome_atual = l
-
-                m = re.search(r"^(\d{4,}).*(\d+,\d{2})$", l)
-                if m and nome_atual:
-                    codigo = m.group(1)
-                    preco = float(m.group(2).replace(",", "."))
-                    lista.append((codigo, nome_atual, preco))
-
-    return lista
+                except Exception as e:
+                    print(f"Erro ao processar linha: {row}, erro: {e}")
+    
+    return cliente, itens  # Retorna as informações do cliente e os itens do pedido
